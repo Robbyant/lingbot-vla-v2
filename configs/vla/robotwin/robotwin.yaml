@@ -96,6 +96,7 @@ train:
       num_backbone_tokens: 256
       token_size: 16
       dim_out: 1024
+      input_size: 224
       use_future_depth: true
       block_future_depth_to_action: true
       detach_future_image_feats: true
