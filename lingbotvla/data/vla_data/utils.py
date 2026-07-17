@@ -546,13 +546,30 @@ class FeatureTransform:
     def pad_and_concat(self, item, w_action = True):
         images = {}
         future_images = {}
+
+        def _to_uint8(img):
+            # Keep images in uint8 [0, 255] before the Qwen-VL image processor, whose
+            # `do_rescale=True` divides by 255. lerobot decodes mp4 (video dtype) cameras
+            # already in uint8, but decodes parquet-embedded PNG (image dtype) cameras into
+            # float32 [0, 1]; feeding the latter as-is would be rescaled a second time and
+            # collapse the input to ~-1. Convert float [0, 1]-ish back to uint8, leave uint8 alone.
+            if not torch.is_tensor(img) or not img.is_floating_point():
+                return img
+            try:
+                max_val = float(img.max())
+            except RuntimeError:
+                max_val = 0.0
+            if max_val <= 2.0:
+                img = (img * 255).round().clamp(0, 255).to(torch.uint8)
+            return img
+
         for image_key in self.feature_config.images:
             if image_key in self.images and image_key in item:
                 if not self.use_future_image:
-                    images[image_key] = item[image_key]
+                    images[image_key] = _to_uint8(item[image_key])
                 else:
-                    images[image_key] = item[image_key][0]
-                    future_images[image_key] = item[image_key][-1]
+                    images[image_key] = _to_uint8(item[image_key][0])
+                    future_images[image_key] = _to_uint8(item[image_key][-1])
 
         actions, action_joints_pad = [], []
         states, state_joints_pad = [], []
