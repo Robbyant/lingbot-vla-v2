@@ -99,18 +99,6 @@ class LeRobotDataset(BaseLeRobotDataset):
             result[key] = torch.stack(self.hf_dataset[relative_indices][key])
         return result
 
-    def load_hf_dataset(self, features=None):
-        episodes = self.episodes if self.episodes is not None else list(range(self.meta.total_episodes))
-        files = [str(self.root / self.meta.get_data_file_path(ep_idx)) for ep_idx in episodes]
-        hf_dataset = _hf_load_dataset("parquet", data_files=files, split="train")
-        if features is not None:
-            # available = set(hf_dataset.column_names)
-            # features = [f for f in features if f in available]
-            hf_dataset = hf_dataset.select_columns(features)
-
-        hf_dataset.set_transform(hf_transform_to_torch)
-        return hf_dataset
-
     def _query_videos(self, query_timestamps: dict[str, list[float]], ep_idx: int) -> dict[str, torch.Tensor]:
         """Note: When using data workers (e.g. DataLoader with num_workers>0), do not call this function
         in the main process (e.g. by using a second Dataloader with num_workers=0). It will result in a
