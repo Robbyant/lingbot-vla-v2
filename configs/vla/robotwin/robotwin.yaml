@@ -19,7 +19,6 @@ data:
     - camera_top
     - camera_wrist_left
     - camera_wrist_right
-  prompt_type: global
   norm_type:
     - arm.position: bounds_99_woclip
     - end.position: bounds_99_woclip
@@ -30,7 +29,7 @@ data:
 train:
   output_dir: /path/to/save_ckpt
   moe_monitor_interval: 1000
-  enable_gradient_checkpointing: true
+  enable_gradient_checkpointing: false # Set to true if GPU memory is insufficient, but this will slow down training.
   precompute_grid_thw: true
   vlm_causal: true
   vlm_fsdp: true
@@ -63,15 +62,16 @@ train:
   action_dim: 55
   max_action_dim: 55
   max_state_dim: 55
-  optimizer: muon
   lr: 1.0e-4
-  lr_decay_style: constant
+  lr_min: 5.0e-5
+  lr_decay_style: cosine
+  optimizer: muon
   num_train_epochs: 29000
-  micro_batch_size: 1
-  global_batch_size: 3
-  max_steps: 30000
+  micro_batch_size: 32
+  global_batch_size: 1024 # Training uses 32 GPUs: global_batch_size = micro_batch_size * 32
+  max_steps: 50000
   ckpt_manager: dcp
-  save_steps: 30000
+  save_steps: 10000
   save_epochs: 29000
   enable_fp32: true
   enable_resume: true
@@ -98,14 +98,14 @@ train:
       dim_out: 1024
       input_size: 224
       use_future_depth: true
-      block_future_depth_to_action: true
+      block_future_depth_to_action: false
       detach_future_image_feats: true
     video:
       ckpt_path: /path/to/dino_video/teacher_step_10000.pth
       config_path: /path/to/dino_video/config.yaml
       attention_mode: flex_block_causal
       input_size: 256
-      block_suffix_to_future_video: true
+      block_suffix_to_future_video: false
       share_future_depth_query: true
       use_shared_future_task_proj: true
       use_current_shared_task_proj: true
@@ -130,7 +130,7 @@ train:
       # Enables current-DINO patch alignment and current depth/DINO shared query projection.
       use_patch_loss: true
       use_current_patch_loss: true
-      use_cosine_loss: false
+      use_cosine_loss: true
       cosine_loss_weight: 0.2
       use_cls_loss: false
       cls_loss_type: mse

@@ -56,7 +56,7 @@ class MultiVLADataset(Dataset):
         disabled_image_features = False,
         return_item = False,
         transform=None,
-        prompt_type = 'both',
+        prompt_type = 'global',
         image_augment = False,
         use_depth_align=False,
         use_future_image=False,
@@ -75,42 +75,31 @@ class MultiVLADataset(Dataset):
         
         self.feature_transforms = {}
 
-        if prompt_type =='both':
-            use_subtask_as_prompt = [True, False]
-        elif prompt_type =='global':
-            use_subtask_as_prompt = [False]
-        elif prompt_type =='subtask':
-            use_subtask_as_prompt = [True]
-        else:
-            raise ValueError(f'prompt_type {prompt_type} is not supported')
-        
         _datasets = []
         for i, repo_id in tqdm(enumerate(repo_ids), desc="Initializing datasets", total=len(repo_ids)):
-            for _use_subtask_as_prompt in use_subtask_as_prompt:
-                feature_transform = self.feature_transforms[self.data_names[i]] if self.data_names[i] in self.feature_transforms else None
-                dataset = VLADataset(
-                        repo_id,
-                        self.data_names[i],
-                        dataset_config,
-                        robot_config_root,
-                        config,
-                        processor,
-                        video_backend = video_backend,
-                        chunk_size = chunk_size,
-                        image_size = image_size,
-                        do_nomalize = do_nomalize,
-                        return_item = return_item,
-                        disabled_image_features = disabled_image_features,
-                        feature_transform = feature_transform,
-                        transform=transform,
-                        use_subtask_as_prompt = _use_subtask_as_prompt,
-                        image_augment = image_augment,
-                        use_depth_align = use_depth_align,
-                        use_future_image=use_future_image,
-                    )
-                if self.data_names[i] not in self.feature_transforms:
-                    self.feature_transforms[self.data_names[i]] = dataset.feature_transform
-                _datasets.append(dataset)
+            feature_transform = self.feature_transforms[self.data_names[i]] if self.data_names[i] in self.feature_transforms else None
+            dataset = VLADataset(
+                    repo_id,
+                    self.data_names[i],
+                    dataset_config,
+                    robot_config_root,
+                    config,
+                    processor,
+                    video_backend = video_backend,
+                    chunk_size = chunk_size,
+                    image_size = image_size,
+                    do_nomalize = do_nomalize,
+                    return_item = return_item,
+                    disabled_image_features = disabled_image_features,
+                    feature_transform = feature_transform,
+                    transform=transform,
+                    image_augment = image_augment,
+                    use_depth_align = use_depth_align,
+                    use_future_image=use_future_image,
+                )
+            if self.data_names[i] not in self.feature_transforms:
+                self.feature_transforms[self.data_names[i]] = dataset.feature_transform
+            _datasets.append(dataset)
 
         self._datasets = _datasets
 

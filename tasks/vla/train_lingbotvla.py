@@ -310,8 +310,8 @@ class MyDataArguments(DataArguments):
         default=None,
         metadata={"help": "Path to the normalization stats file."},
     )
-    prompt_type: Literal["global", "subtask", "both"] = field(
-        default="both",
+    prompt_type: Literal["global", "subtask"] = field(
+        default="global",
         metadata={"help": "Type of the prompt."},
     )
     use_future_image: bool = field(
@@ -434,25 +434,12 @@ def main():
             data_collate_fn.append(OmniDataCollatorWithPacking()) # TODO 8.21
         else:
             data_collate_fn.append(OmniDataCollatorWithPadding())
-    # TODO enable sp
-    # if get_parallel_state().sp_enabled:
-    #     data_collate_fn.append(
-    #         OmniSequenceShardCollator(
-    #             padding_scale={
-    #                 "pixel_values": processor.image_processor.merge_size**2,
-    #             },
-    #             rmpad_with_pos_ids=args.train.rmpad_with_pos_ids,
-    #         )
-    #     )
+    
     if args.data.dataloader_type == "native":
         if args.data.datasets_type == 'vla':
             args.data.chunk_size = args.train.chunk_size
             train_dataset = build_vla_dataset(dataset_config=args.data, model_config=args.model, config=model.config, processor=processor, use_depth_align=use_depth_align)
-            # if 'Qwen' in args.model.tokenizer_path:
-            #     train_dataset = build_vla_dataset(dataset_config=args.data, model_config=model.config, processor=processor)
-            # else:
-            #     train_dataset = build_vla_dataset(datasets_type=args.data.datasets_type, repo_id=args.data.train_path, config=model.config, tokenizer=processor.tokenizer)
-            args.train.compute_train_steps(args.data.max_seq_len, args.data.train_size, len(train_dataset)) # 282,408,757 for agibot
+            args.train.compute_train_steps(args.data.max_seq_len, args.data.train_size, len(train_dataset))
         
         train_dataloader = build_dataloader(
             dataset=train_dataset,
@@ -767,7 +754,6 @@ def main():
                 depth_forward_time = 0
                 if use_depth_align:
                     with torch.no_grad():
-                        # torch.cuda.synchronize()
                         depth_start_time = time.time()
                         pil_images = micro_batch.pop('pil_images', None)
                         future_pil_images = micro_batch.pop('future_pil_images', None) if (use_future_depth or use_future_video) else None
@@ -794,11 +780,9 @@ def main():
                                     future_video_targets = future_video_target_bundle
                             future_video_current_rgb = pil_images
                             future_video_target_rgb = future_pil_images
-                        # torch.cuda.synchronize()
                         depth_forward_time = time.time() - depth_start_time
 
                 with model_fwd_context:
-                    # torch.cuda.synchronize()
                     model_outputs = model(
                         **micro_batch,
                         depth_targets=depth_targets,
@@ -826,7 +810,6 @@ def main():
                         loss, vla_loss, depth_loss, future_depth_loss, future_video_loss, seq_wise_loss, loss_log, depth_preds, future_depth_preds, future_video_preds, future_video_current_preds = model_outputs
                     else:
                         raise ValueError(f"Unexpected model output length: {len(model_outputs)}")
-                    # torch.cuda.synchronize()
 
                     loss = loss / len(micro_batches)
                     vla_loss = vla_loss / len(micro_batches)
@@ -919,7 +902,6 @@ def main():
                 lr = max(all_lrs)
                 expert_lr = None
             train_metrics = environ_meter.step(delta_time, global_step=global_step)
-            # logger.info_rank0(f'=====Check MFU: {train_metrics}=====')
             data_loader_tqdm.update()
             expert_lr_str = f"Expert_LR {expert_lr:.2e}, " if expert_lr is not None else ""
             maxvio_val = loss_log.get("moe_summary/maxvio_avg", loss_log.get("token_moe/avg_maxvio", None))

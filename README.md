@@ -24,6 +24,7 @@ Compared with LingBot-VLA 1.0, LingBot-VLA 2.0 improves three core capabilities:
 
 ## News
 
+- **[2026-07-25]** RoboTwin post-training weights: [lingbot-vla-v2-6b-robotwin](https://huggingface.co/robbyant/lingbot-vla-v2-6b-robotwin).
 - **[2026-07-08]** LingBot-VLA 2.0 technical report and pre-trained weights are prepared.
 
 ## Installation

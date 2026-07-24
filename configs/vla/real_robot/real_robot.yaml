@@ -37,7 +37,7 @@ data:
 train:
   output_dir: /path/to/save_ckpt
   moe_monitor_interval: 1000
-  enable_gradient_checkpointing: true
+  enable_gradient_checkpointing: false # Set to true if GPU memory is insufficient, but this will slow down training.
   precompute_grid_thw: true
   vlm_causal: true
   vlm_fsdp: true
@@ -73,11 +73,11 @@ train:
   lr: 5.0e-5
   lr_decay_style: constant
   num_train_epochs: 29000
-  micro_batch_size: 1
-  global_batch_size: 4
-  max_steps: 40000
+  micro_batch_size: 32
+  global_batch_size: 256
+  max_steps: 60000
   ckpt_manager: dcp
-  save_steps: 40000
+  save_steps: 20000
   save_epochs: 29000
   enable_fp32: true
   enable_resume: true
@@ -104,14 +104,14 @@ train:
       dim_out: 1024
       input_size: 224
       use_future_depth: true
-      block_future_depth_to_action: true
+      block_future_depth_to_action: false
       detach_future_image_feats: true
     video:
-      ckpt_path: /path/to/video-dino/teacher_step_10000.pth
-      config_path: /path/to/video-dino/config.yaml
+      ckpt_path: /path/to/dino_video/teacher_step_10000.pth
+      config_path: /path/to/dino_video/config.yaml
       attention_mode: flex_block_causal
       input_size: 256
-      block_suffix_to_future_video: true
+      block_suffix_to_future_video: false
       share_future_depth_query: true
       use_shared_future_task_proj: true
       use_current_shared_task_proj: true
@@ -136,7 +136,7 @@ train:
       # Enables current-DINO patch alignment and current depth/DINO shared query projection.
       use_patch_loss: true
       use_current_patch_loss: true
-      use_cosine_loss: false
+      use_cosine_loss: true
       cosine_loss_weight: 0.2
       use_cls_loss: false
       cls_loss_type: mse

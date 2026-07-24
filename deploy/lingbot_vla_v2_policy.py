@@ -573,6 +573,18 @@ def main():
     )
 
     parser.add_argument(
+        "--use_bf16",
+        type=str2bool,
+        default=True,
+    )
+
+    parser.add_argument(
+        "--use_fp32",
+        type=str2bool,
+        default=False,
+    )
+
+    parser.add_argument(
         "--use_compile",
         type=str2bool,
         default=True,
@@ -584,8 +596,8 @@ def main():
         args.model_path,
         use_length=args.use_length,
         chunk_ret=args.chunk_ret,
-        use_bf16=True,
-        use_fp32=False,
+        use_bf16=args.use_bf16,
+        use_fp32=args.use_fp32,
         use_compile=args.use_compile,
     )
     model_server = WebsocketPolicyServer(model, port=args.port)

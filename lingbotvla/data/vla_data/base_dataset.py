@@ -165,7 +165,6 @@ class VLADataset(Dataset):
         return_item = False,
         disabled_image_features = False,
         feature_transform = None,
-        use_subtask_as_prompt = False,
         transform=None,
         image_augment = False,
         use_depth_align = False,

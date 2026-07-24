@@ -37,7 +37,6 @@ data:
     - camera_top
     - camera_wrist_left
     - camera_wrist_right
-  prompt_type: global
 ```
 
 ### Multiple Datasets
@@ -74,7 +73,6 @@ data:
     - camera_top
     - camera_wrist_left
     - camera_wrist_right
-  prompt_type: global
 ```
 
 `MultiVLADataset` will instantiate one `VLADataset` per line and concatenate them at runtime. This replaces the old "merge datasets first" workflow.
@@ -212,7 +210,6 @@ data:
     - camera_top
     - camera_wrist_left
     - camera_wrist_right
-  prompt_type: global
 ```
 
 Rules:

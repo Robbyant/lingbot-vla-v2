@@ -55,7 +55,7 @@ robot configs, and normalization statistics, see
 | `data.cameras` | Optional[List[str]] | `None` | Ordered camera names used by the VLA model. |
 | `data.norm_type` | Optional[List[Dict[str, str]]] | `None` | Per-joint normalization type. Scalar strings are not supported by `train_lingbotvla.py`. Example: `[{arm.position: bounds_99_woclip}, {effector.position: bounds_99_woclip}]`. |
 | `data.norm_stats_file` | Optional[str] | `None` | Path to the normalization stats JSON file. |
-| `data.prompt_type` | `"global"`, `"subtask"`, `"both"` | `"both"` | Prompt type used by the VLA dataset. Current RoboTwin config uses `"global"`. |
+| `data.prompt_type` | `"global"`, `"subtask"` | `"global"` | Prompt type used by the VLA dataset. Current RoboTwin config uses `"global"`. |
 | `data.use_future_image` | bool | `False` | Whether to load future image frames for native-depth/future-video training. |
 | `data.img_size` | int | `256` | Image size used by VLA data utilities. |
 | `data.state_norm_type` | str | `"none"` | Normalization type for VLA state features. Use `"none"` to reuse `norm_type`; use `"sincos"` to encode raw state angles as cos/sin while actions still use `norm_type`. |
