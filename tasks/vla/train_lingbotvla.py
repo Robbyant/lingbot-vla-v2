@@ -310,9 +310,9 @@ class MyDataArguments(DataArguments):
         default=None,
         metadata={"help": "Path to the normalization stats file."},
     )
-    prompt_type: Literal["global", "subtask"] = field(
+    prompt_type: Literal["global"] = field(
         default="global",
-        metadata={"help": "Type of the prompt."},
+        metadata={"help": "Prompt type. The released data pipeline currently supports only global task prompts."},
     )
     use_future_image: bool = field(
         default=False,

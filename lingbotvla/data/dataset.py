@@ -30,6 +30,7 @@ import json
 from ..distributed.parallel_state import get_parallel_state
 from ..utils import logging
 from ..utils.dist_utils import main_process_first
+from ..utils.vla_prompt import validate_vla_prompt_type
 from .vla_data import *
 
 logger = logging.get_logger(__name__)
@@ -84,7 +85,7 @@ def build_vla_dataset(
     repo_id = dataset_config.train_path
     robot_config_root = dataset_config.robot_config_root
     chunk_size = dataset_config.chunk_size
-    prompt_type = dataset_config.prompt_type
+    prompt_type = validate_vla_prompt_type(dataset_config.prompt_type)
     processor = processor if processor is not None and 'qwen' in model_config.tokenizer_path.lower() else None
     img_size = getattr(dataset_config, 'img_size', 256)
     image_augment = bool(getattr(dataset_config, "image_augment", False))

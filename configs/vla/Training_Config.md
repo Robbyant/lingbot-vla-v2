@@ -331,7 +331,7 @@ train:
 | `robot_config_root` | str | — | Directory containing robot config YAML files, for example `configs/robot_configs`. |
 | `joints` | List[Dict] | — | Max dim of each named joints in data. |
 | `cameras` | List[str] | — | Camera names in data. |
-| `prompt_type` | str | `"both"` | Prompt type. Supported values are `"global"`, `"subtask"`, and `"both"`. RoboTwin uses `"global"`. |
+| `prompt_type` | str | `"global"` | Prompt type. The released data pipeline currently supports only `"global"`; `"subtask"` and `"both"` are rejected instead of silently falling back to the global task prompt. |
 | `norm_type` | List[Dict[str, str]] | — | Per-joint normalization type used by `train_lingbotvla.py`. Each joint type in `data.joints` that appears in states/actions should have one entry, for example `[{arm.position: bounds_99_woclip}, {effector.position: bounds_99_woclip}]`. Options include `"meanstd"`, `"bounds_98"`, `"bounds_99"`, `"bounds_98_woclip"`, `"bounds_99_woclip"`, `"std"`, `"minmax"`, `"minmax_woclip"`, `"sincos"`, and `"identity"`. |
 | `norm_stats_file` | str | — | Path to pre-computed normalization statistics JSON file. Must be the same when computing normalization statistics! |
 | `use_future_image` | bool | `false` | Load future image frames for native-depth/future-video training. |

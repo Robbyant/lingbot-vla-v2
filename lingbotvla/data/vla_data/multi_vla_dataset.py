@@ -12,6 +12,7 @@ from tqdm import tqdm
 
 from torch.utils.data import Dataset
 from .base_dataset import VLADataset
+from ...utils.vla_prompt import validate_vla_prompt_type
 
 logger = helper.create_logger(__name__)
 
@@ -62,6 +63,7 @@ class MultiVLADataset(Dataset):
         use_future_image=False,
     ):
         
+        self.prompt_type = validate_vla_prompt_type(prompt_type)
         self.config = config
         self.processor = processor
         self.return_item = return_item
