@@ -50,6 +50,49 @@ except Exception:
 logger = logging.get_logger(__name__)
 
 
+def _action_valid_mask(
+    losses: Tensor, action_is_pad: Tensor | None
+) -> Tensor | None:
+    """Build a broadcastable validity mask for per-step action losses.
+
+    ``action_is_pad`` is produced by the data transform with shape ``(B, T)``
+    and marks action steps that cross an episode boundary.  Some training
+    modes duplicate the batch for paired/repeated examples, so accept the
+    corresponding ``2B`` loss batch as well.  Keeping this logic next to the
+    loss reduction prevents padded targets from affecting either gradients or
+    the reported mean loss.
+    """
+    if action_is_pad is None:
+        return None
+
+    pad = torch.as_tensor(action_is_pad, device=losses.device, dtype=torch.bool)
+    if pad.ndim == 1:
+        pad = pad.unsqueeze(0)
+    if pad.ndim != 2:
+        raise ValueError(
+            "action_is_pad must have shape (batch, steps), "
+            f"got {tuple(pad.shape)}"
+        )
+
+    if pad.shape[0] != losses.shape[0]:
+        if pad.shape[0] * 2 == losses.shape[0]:
+            pad = pad.repeat(2, 1)
+        else:
+            raise ValueError(
+                "action_is_pad batch dimension must match losses: "
+                f"{pad.shape[0]} vs {losses.shape[0]}"
+            )
+    if pad.shape[1] < losses.shape[1]:
+        raise ValueError(
+            "action_is_pad has fewer steps than the action losses: "
+            f"{pad.shape[1]} vs {losses.shape[1]}"
+        )
+
+    # Trim a longer data chunk to the action steps emitted by the model and
+    # add a feature dimension for broadcasting over action coordinates.
+    return (~pad[:, : losses.shape[1]]).unsqueeze(-1)
+
+
 class QwenvlWithExpertV2Config(PretrainedConfig):
     model_type = "QwenvlWithExpertV2Model"
 
@@ -1287,19 +1330,33 @@ class LingbotVlaV2Policy(PreTrainedModel):
             future_video_current_patch=future_video_current_patch,
         )
 
+        action_valid_mask = _action_valid_mask(losses, action_is_pad)
         if joint_mask is not None:
             if "repeat" in self.config.loss_type:
                 joint_mask = joint_mask.repeat(2, 1, 1)
             assert len(joint_mask.shape) == 3
-            
-            masked_losses = losses * joint_mask
-            valid_counts = joint_mask.sum(dim=(1, 2)).clamp(min=1)
+
+            # ``joint_mask`` selects valid action coordinates.  Intersect it
+            # with the episode-boundary mask so padded action *steps* do not
+            # contribute to the flow-matching objective or its statistics.
+            loss_mask = joint_mask.to(device=losses.device, dtype=losses.dtype)
+            if action_valid_mask is not None:
+                loss_mask = loss_mask * action_valid_mask.to(dtype=losses.dtype)
+            masked_losses = losses * loss_mask
+            valid_counts = loss_mask.sum(dim=(1, 2)).clamp(min=1)
             batch_mean_losses = masked_losses.sum(dim=(1, 2)) / valid_counts
-            loss_vla = masked_losses.sum() / joint_mask.sum().clamp(min=1)
+            loss_vla = masked_losses.sum() / loss_mask.sum().clamp(min=1)
         else:
             losses = losses[:, :, : self.config.action_dim]
-            batch_mean_losses = losses.mean(dim=(1, 2))
-            loss_vla = losses.mean()
+            if action_valid_mask is not None:
+                loss_mask = action_valid_mask.expand(-1, -1, losses.shape[-1])
+                masked_losses = losses * loss_mask.to(dtype=losses.dtype)
+                valid_counts = loss_mask.sum(dim=(1, 2)).clamp(min=1)
+                batch_mean_losses = masked_losses.sum(dim=(1, 2)) / valid_counts
+                loss_vla = masked_losses.sum() / loss_mask.sum().clamp(min=1)
+            else:
+                batch_mean_losses = losses.mean(dim=(1, 2))
+                loss_vla = losses.mean()
 
         loss_dict["batch_mean_losses"] = batch_mean_losses.detach()
         total_loss = (
