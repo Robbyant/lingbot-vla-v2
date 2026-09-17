@@ -246,7 +246,11 @@ class Qwen3VLModel(_Qwen3VLModel):
 
 
 class Qwen3VLForConditionalGeneration(_Qwen3VLForConditionalGeneration, GenerationMixin):
-    _tied_weights_keys = ["lm_head.weight"]
+    # transformers 5.x expects a dict mapping, 4.x a list; follow whichever the base uses.
+    if isinstance(getattr(_Qwen3VLForConditionalGeneration, "_tied_weights_keys", None), dict):
+        _tied_weights_keys = dict(_Qwen3VLForConditionalGeneration._tied_weights_keys)
+    else:
+        _tied_weights_keys = ["lm_head.weight"]
     config_class = Qwen3VLConfig
     _no_split_modules = ["Qwen3VLTextDecoderLayer", "Qwen3VLVisionBlock"]
 
@@ -255,6 +259,10 @@ class Qwen3VLForConditionalGeneration(_Qwen3VLForConditionalGeneration, Generati
         self.model = Qwen3VLModel(config)
         self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
         self.post_init()
+
+    @property
+    def visual(self):
+        return self.model.visual
 
 
 @torch.compiler.disable

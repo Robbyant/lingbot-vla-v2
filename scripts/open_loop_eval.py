@@ -204,10 +204,8 @@ def evaluate_single_trajectory(
     max_infer_time = 10
 ):
     # Ensure steps doesn't exceed trajectory length
-    if LEROBOT_DATASET_API == "v2":
-        start_id, end_id = dataset.episode_data_index['from'][traj_id], dataset.episode_data_index['to'][traj_id]
-    else:
-        start_id, end_id = dataset.meta.episodes[traj_id]["dataset_from_index"], dataset.meta.episodes[traj_id]["dataset_to_index"]
+    # episode_data_index is the stable accessor across lerobot v2.x/v3.x packages
+    start_id, end_id = dataset.episode_data_index['from'][traj_id], dataset.episode_data_index['to'][traj_id]
     
     gt_action_across_time = []
     state_joints_across_time = []
@@ -322,10 +320,13 @@ def main(policy, robo_name, data_root, traj_ids, chunk_size, save_plot_path, max
     all_mae = []
 
     for traj_id in traj_ids:
-        if LEROBOT_DATASET_API == "v2":
-            valid_episode_ids = dataset.meta.episodes.keys()
+        episodes_meta = dataset.meta.episodes
+        if isinstance(episodes_meta, dict) and "episode_index" in episodes_meta:
+            valid_episode_ids = episodes_meta["episode_index"]  # lerobot v3.0 meta
+        elif LEROBOT_DATASET_API == "v2" or isinstance(episodes_meta, dict):
+            valid_episode_ids = episodes_meta.keys()
         else:
-            valid_episode_ids = dataset.meta.episodes["episode_index"]
+            valid_episode_ids = episodes_meta
 
         if traj_id not in valid_episode_ids:
             logging.warning(f"Trajectory ID {traj_id} is out of range. Skipping.")

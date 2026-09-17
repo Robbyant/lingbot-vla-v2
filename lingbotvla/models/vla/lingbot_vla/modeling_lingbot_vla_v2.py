@@ -265,12 +265,26 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
 
     def build_prefix_position_ids(self, input_ids, attention_mask,
                                    image_grid_thw=None, video_grid_thw=None):
-        position_ids, _ = self.qwenvl.model.get_rope_index(
+        kwargs = dict(
             input_ids=input_ids,
             image_grid_thw=image_grid_thw,
             video_grid_thw=video_grid_thw,
             attention_mask=attention_mask,
         )
+        try:
+            position_ids, _ = self.qwenvl.model.get_rope_index(**kwargs)
+        except TypeError:
+            # transformers 5.x requires mm_token_type_ids (0=text, 1=image, 2=video);
+            # derive it from the placeholder token ids (mirrors the processor output).
+            vlm_cfg = self.qwenvl.config
+            mm_token_type_ids = torch.zeros_like(input_ids, dtype=torch.int)
+            mm_token_type_ids[input_ids == vlm_cfg.image_token_id] = 1
+            video_token_id = getattr(vlm_cfg, "video_token_id", None)
+            if video_token_id is not None:
+                mm_token_type_ids[input_ids == video_token_id] = 2
+            position_ids, _ = self.qwenvl.model.get_rope_index(
+                mm_token_type_ids=mm_token_type_ids, **kwargs
+            )
         return position_ids
 
     def apply_mrope(self, query_states, key_states, position_ids):

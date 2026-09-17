@@ -28,13 +28,20 @@ from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_u
 from transformers.processing_utils import Unpack
 import torch.distributed._tensor as dt
 
-if is_flash_attn_available():
+import importlib.util as _ilu
+
+# transformers 5.x is_flash_attn_available() may report True without the
+# flash_attn package installed; require the actual package.
+if is_flash_attn_available() and _ilu.find_spec("flash_attn") is not None:
     from flash_attn.layers.rotary import apply_rotary_emb
     from flash_attn.flash_attn_interface import flash_attn_varlen_func
     from transformers.modeling_flash_attention_utils import _flash_attention_forward
 import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as hf_qwen25vl 
+try:
+    from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2RMSNorm
+except ImportError:  # renamed in transformers 5.x
+    from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLRMSNorm as Qwen2RMSNorm
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
-    Qwen2RMSNorm,
     Qwen2_5_VLMLP,
     Qwen2_5_VLAttention,
     Qwen2MLP,

@@ -110,8 +110,9 @@ class LeRobotDataset(BaseLeRobotDataset):
             if LEROBOT_DATASET_API == "v3":
                 # LeRobot v3 stores episodes sequentially in a shared mp4, so
                 # query timestamps are relative to the episode start.
+                # v2.1-style metas (per-episode mp4) carry no offset -> 0.0.
                 ep = self.meta.episodes[ep_idx]
-                from_timestamp = ep[f"videos/{vid_key}/from_timestamp"]
+                from_timestamp = ep.get(f"videos/{vid_key}/from_timestamp", 0.0) if isinstance(ep, dict) else 0.0
                 query_ts = [from_timestamp + ts for ts in query_ts]
 
             video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)

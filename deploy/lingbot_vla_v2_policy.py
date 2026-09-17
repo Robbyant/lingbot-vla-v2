@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import time
 import yaml
@@ -212,11 +213,11 @@ class LingbotVLAv2Server:
 
         self.vla = self.load_vla(path_to_pi_model)
         if use_bf16:
-            self.vla = self.vla.to(torch.bfloat16).cuda().eval()
+            self.vla = self.vla.to(torch.bfloat16).to(device.device_type()).eval()
         else:
             # fp32
             self.vla.model.float()
-            self.vla = self.vla.cuda().eval()
+            self.vla = self.vla.to(device.device_type()).eval()
 
         self.global_step = 0
         self.last_action_chunk = None
@@ -233,6 +234,21 @@ class LingbotVLAv2Server:
             with safe_open(file_path, framework="pt", device="cpu") as f:
                 for key in f.keys():
                     merged_weights[key] = f.get_tensor(key)
+
+        # The released ckpt stores MoE experts as fused 3D tensors
+        # (mlp.experts.{gate,up,down}_proj). With moe_implementation=eager the
+        # model expects per-expert 2D weights (mlp.experts.<e>...); expand.
+        expert_mod = self.vla.model.qwenvl_with_expert.qwen_expert.model.layers[0].mlp.experts
+        if isinstance(expert_mod, torch.nn.ModuleList):
+            fused_re = re.compile(r"^(.*\.mlp\.experts)\.(gate_proj|up_proj|down_proj)$")
+            for key in list(merged_weights.keys()):
+                m = fused_re.match(key)
+                if not m:
+                    continue
+                prefix, proj = m.groups()
+                fused = merged_weights.pop(key)  # (E, in, out) or (E, out, in)
+                for e in range(fused.shape[0]):
+                    merged_weights[f"{prefix}.{e}.{proj}.weight"] = fused[e]
         self.vla.load_state_dict(merged_weights, strict=strict)
 
     def merge_qwen_config(self, qwen_config):

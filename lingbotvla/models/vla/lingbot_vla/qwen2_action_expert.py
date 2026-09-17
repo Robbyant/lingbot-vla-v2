@@ -500,7 +500,11 @@ class Qwen2Model(Qwen2PreTrainedModel):
 
 
 class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
-    _tied_weights_keys = ["lm_head.weight"]
+    # transformers 5.x expects a dict mapping, 4.x a list; follow whichever the base uses.
+    if isinstance(getattr(_Qwen2ForCausalLM, "_tied_weights_keys", None), dict):
+        _tied_weights_keys = dict(_Qwen2ForCausalLM._tied_weights_keys)
+    else:
+        _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
     get_input_embeddings = _Qwen2ForCausalLM.get_input_embeddings
