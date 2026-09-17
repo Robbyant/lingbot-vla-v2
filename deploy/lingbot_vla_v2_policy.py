@@ -30,6 +30,7 @@ from lingbotvla.models.vla.lingbot_vla.modeling_lingbot_vla_v2 import LingbotVla
 from lingbotvla.models.vla.lingbot_vla.qwen3vl_in_vla import apply_lingbot_qwen3_vl_patch
 
 from lingbotvla.data.vla_data.utils import FeatureTransform
+import device_select as device
 from lingbotvla.models import build_processor
 import time
 import random
@@ -37,7 +38,7 @@ import random
 def set_seed_everywhere(seed: int):
     """Sets the random seed for Python, NumPy, and PyTorch functions."""
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    device.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
@@ -65,7 +66,7 @@ class PolicyPreprocessMixin:
         self, observation: dict[str, Tensor], use_bf16: bool = False
     ):
         self.eval()
-        device = 'cuda'
+        device_type = device.device_type()
         if use_bf16:
             dtype = torch.bfloat16
         else:
@@ -77,12 +78,12 @@ class PolicyPreprocessMixin:
             observation['img_masks'] = observation['img_masks'].unsqueeze(0)
 
         actions = self.model.sample_actions(
-            observation['images'].to(dtype=dtype, device=device),
-            observation['img_masks'].to(device=device),
-            observation['lang_tokens'].unsqueeze(0).to(device=device),
-            observation['lang_masks'].unsqueeze(0).to(device=device),
-            observation['state'].unsqueeze(0).to(dtype=dtype, device=device),
-            image_grid_thw=self._to_device_image_grid_thw(observation.get('image_grid_thw'), device),
+            observation['images'].to(dtype=dtype, device=device_type),
+            observation['img_masks'].to(device=device_type),
+            observation['lang_tokens'].unsqueeze(0).to(device=device_type),
+            observation['lang_masks'].unsqueeze(0).to(device=device_type),
+            observation['state'].unsqueeze(0).to(dtype=dtype, device=device_type),
+            image_grid_thw=self._to_device_image_grid_thw(observation.get('image_grid_thw'), device_type),
         )
         delta_time = time.time() - s1
         print(f'sample_actions cost {delta_time} s')
@@ -110,7 +111,7 @@ class PolicyPreprocessMixin:
         with shape ``(B, chunk, joint_max_dim)``.
         """
         self.eval()
-        device = "cuda"
+        device_type = device.device_type()
         dtype = torch.bfloat16 if use_bf16 else torch.float32
         s1 = time.time()
 
@@ -135,40 +136,40 @@ class PolicyPreprocessMixin:
             with torch.inference_mode():
                 for _ in range(3):
                     _ = sample_compile_fn(
-                            images.to(dtype=dtype, device=device),
-                            img_masks.to(device=device),
-                            lang_tokens.to(device=device),
-                            lang_masks.to(device=device),
-                            state.to(dtype=dtype, device=device),
-                            image_grid_thw=self._to_device_image_grid_thw(image_grid_thw, device),
+                            images.to(dtype=dtype, device=device_type),
+                            img_masks.to(device=device_type),
+                            lang_tokens.to(device=device_type),
+                            lang_masks.to(device=device_type),
+                            state.to(dtype=dtype, device=device_type),
+                            image_grid_thw=self._to_device_image_grid_thw(image_grid_thw, device_type),
                     )
-                torch.cuda.synchronize()
+                device.synchronize()
 
                 iters = 5
-                starts = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-                ends = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+                starts = [device.event(enable_timing=True) for _ in range(iters)]
+                ends = [device.event(enable_timing=True) for _ in range(iters)]
                 for i in range(iters):
                     starts[i].record()
                     actions = sample_compile_fn(
-                                    images.to(dtype=dtype, device=device),
-                                    img_masks.to(device=device),
-                                    lang_tokens.to(device=device),
-                                    lang_masks.to(device=device),
-                                    state.to(dtype=dtype, device=device),
-                                    image_grid_thw=self._to_device_image_grid_thw(image_grid_thw, device),
+                                    images.to(dtype=dtype, device=device_type),
+                                    img_masks.to(device=device_type),
+                                    lang_tokens.to(device=device_type),
+                                    lang_masks.to(device=device_type),
+                                    state.to(dtype=dtype, device=device_type),
+                                    image_grid_thw=self._to_device_image_grid_thw(image_grid_thw, device_type),
                     )
                     ends[i].record()
-                torch.cuda.synchronize()
+                device.synchronize()
                 gpu_times = [starts[i].elapsed_time(ends[i]) for i in range(iters)]
                 print(f"sample_actions avg time: {sum(gpu_times)/len(gpu_times):.4f} ms, min time: {min(gpu_times):.4f} ms, max time: {max(gpu_times):.4f} ms")
         else:
             actions = sample_compile_fn(
-                            images.to(dtype=dtype, device=device),
-                            img_masks.to(device=device),
-                            lang_tokens.to(device=device),
-                            lang_masks.to(device=device),
-                            state.to(dtype=dtype, device=device),
-                            image_grid_thw=self._to_device_image_grid_thw(image_grid_thw, device),
+                            images.to(dtype=dtype, device=device_type),
+                            img_masks.to(device=device_type),
+                            lang_tokens.to(device=device_type),
+                            lang_masks.to(device=device_type),
+                            state.to(dtype=dtype, device=device_type),
+                            image_grid_thw=self._to_device_image_grid_thw(image_grid_thw, device_type),
             )
 
         delta_time = time.time() - s1
@@ -340,11 +341,11 @@ class LingbotVLAv2Server:
         if path_to_pi_model is not None:
             self.vla = self.load_vla(path_to_pi_model)
             if self.use_bf16:
-                self.vla = self.vla.to(torch.bfloat16).cuda().eval()
+                self.vla = self.vla.to(torch.bfloat16).to(device.device_type()).eval()
             else:
                 #fp32
                 self.vla.model.float()
-                self.vla = self.vla.cuda().eval()
+                self.vla = self.vla.to(device.device_type()).eval()
 
         self.global_step = 0
         self.last_action_chunk = None

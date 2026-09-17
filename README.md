@@ -59,6 +59,60 @@ bash tools/create_train_env.sh \
   --recreate
 ```
 
+### Intel XPU Support
+
+LingBot-VLA 2.0 inference and deployment can run on Intel GPUs through the
+PyTorch XPU backend. Device selection is automatic: XPU is preferred when it
+is available, followed by CUDA and CPU.
+
+**Requirements**
+
+- Python 3.12
+- PyTorch `2.13.0+xpu`
+- `torchvision 0.28.0+xpu`
+- A supported Intel GPU with the matching Intel GPU runtime and oneAPI drivers
+
+**XPU Installation**
+
+The default `tools/create_train_env.sh` script is CUDA-specific. Do not use it
+for XPU because it installs CUDA wheels, requires `torch.cuda.is_available()`,
+and builds CUDA `flash-attn`.
+
+```bash
+python -m pip install \
+  torch==2.13.0+xpu \
+  torchvision==0.28.0+xpu \
+  torchcodec==0.16.0+cpu \
+  --index-url https://download.pytorch.org/whl/xpu
+
+grep -vE '^(torch|torchvision|torchaudio|torchdata|torchcodec)==' \
+  requirements.txt > /tmp/lingbot-vla-v2-requirements-xpu.txt
+python -m pip install -r /tmp/lingbot-vla-v2-requirements-xpu.txt
+python -m pip install -e . --no-deps
+```
+
+`flash-attn` is optional for XPU deployment. The deployment path uses eager
+attention and the runtime maps unavailable `flash_attention_2` requests to
+PyTorch SDPA. Do not install a CUDA-only `flash-attn` wheel into the XPU
+environment.
+
+**Run XPU Inference**
+
+Use the normal deployment command. No model-code changes or explicit device
+argument are required:
+
+```bash
+export QWEN3VL_PATH=/path/to/Qwen3-VL-4B-Instruct
+python -m deploy.lingbot_vla_v2_policy \
+  --model_path /path/to/post_training_checkpoint \
+  --use_length 25 \
+  --port 8000
+```
+
+To force CPU for troubleshooting, set `DEVICE_SELECT_FORCE_CPU=1`. Training,
+distributed FSDP helpers, and custom group-GEMM/Triton kernels still contain
+CUDA-specific paths and are not covered by this XPU deployment support.
+
 ## Model Download
 
 We release **LingBot-VLA 2.0** pre-trained weights as a native-depth model.
