@@ -246,7 +246,11 @@ class Qwen3VLModel(_Qwen3VLModel):
 
 
 class Qwen3VLForConditionalGeneration(_Qwen3VLForConditionalGeneration, GenerationMixin):
-    _tied_weights_keys = ["lm_head.weight"]
+    # transformers 5.x expects a dict mapping, 4.x a list; follow whichever the base uses.
+    if isinstance(getattr(_Qwen3VLForConditionalGeneration, "_tied_weights_keys", None), dict):
+        _tied_weights_keys = dict(_Qwen3VLForConditionalGeneration._tied_weights_keys)
+    else:
+        _tied_weights_keys = ["lm_head.weight"]
     config_class = Qwen3VLConfig
     _no_split_modules = ["Qwen3VLTextDecoderLayer", "Qwen3VLVisionBlock"]
 
@@ -255,6 +259,10 @@ class Qwen3VLForConditionalGeneration(_Qwen3VLForConditionalGeneration, Generati
         self.model = Qwen3VLModel(config)
         self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
         self.post_init()
+
+    @property
+    def visual(self):
+        return self.model.visual
 
 
 @torch.compiler.disable
@@ -292,6 +300,8 @@ def forward_without_grid_thw(
         pos_embeds, position_embeddings, cu_seqlens, _, max_seqlen = self.preprcess_grid_thw(grid_thw)
     if pos_embeds is None:
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
+    # XPU bicubic interpolate may upcast to fp32; keep the add in the model dtype.
+    pos_embeds = pos_embeds.to(hidden_states.dtype)
 
     hidden_states = hidden_states + pos_embeds
     seq_len, _ = hidden_states.size()

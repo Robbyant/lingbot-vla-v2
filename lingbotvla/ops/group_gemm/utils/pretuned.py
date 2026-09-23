@@ -100,10 +100,11 @@ def pretuned(*, algo_key=None, fallback=None):
             if not envvars.is_untuned_warning_suppressed():
                 import torch
 
+                device_name = torch.cuda.get_device_name() if torch.cuda.is_available() else "non-cuda"
                 logger.debug(
                     f"No pre-tuned hyperparameter for kernel [{name}], using fallback config, "
                     "performance may suffer. You may have triton version or device name mismatch. "
-                    f"You have triton=={triton.__version__} and device name [{torch.cuda.get_device_name()}]",
+                    f"You have triton=={triton.__version__} and device name [{device_name}]",
                 )
             configs.update({CATCH_ALL_ALGO_KEY: fallback})
 

@@ -22,6 +22,7 @@ from .modeling_lingbot_vla import (
     replace_lnorm_with_adanorm,
     FlowMatching as FlowMatchingV1,
 )
+import device_select as device
 from .utils import (
     block_suffix_to_fv_,
     create_sinusoidal_pos_embedding,
@@ -127,14 +128,14 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         vlm_config = AutoConfig.from_pretrained(self.config.tokenizer_path)
         if self.config.vocab_size not in (0, 257152):
             vlm_config.text_config.vocab_size = self.config.vocab_size
-        vlm_config._attn_implementation = "flash_attention_2"
-        vlm_config.text_config._attn_implementation = "flash_attention_2"
-        vlm_config.vision_config._attn_implementation = self.config.vit_attn_implementation
+        vlm_config._attn_implementation = device.attn_implementation("flash_attention_2")
+        vlm_config.text_config._attn_implementation = device.attn_implementation("flash_attention_2")
+        vlm_config.vision_config._attn_implementation = device.attn_implementation(self.config.vit_attn_implementation)
         self.qwenvl = Qwen3VLForConditionalGeneration._from_config(vlm_config)
         if self.config.use_lm_head:
             self.qwenvl.tie_weights()
 
-        self.config.qwen_expert_config._attn_implementation = "flash_attention_2"
+        self.config.qwen_expert_config._attn_implementation = device.attn_implementation("flash_attention_2")
         self.qwen_expert = Qwen2ForCausalLM._from_config(self.config.qwen_expert_config, eval=eval)
 
         if getattr(self.config, "adanorm_time", False):
@@ -264,12 +265,26 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
 
     def build_prefix_position_ids(self, input_ids, attention_mask,
                                    image_grid_thw=None, video_grid_thw=None):
-        position_ids, _ = self.qwenvl.model.get_rope_index(
+        kwargs = dict(
             input_ids=input_ids,
             image_grid_thw=image_grid_thw,
             video_grid_thw=video_grid_thw,
             attention_mask=attention_mask,
         )
+        try:
+            position_ids, _ = self.qwenvl.model.get_rope_index(**kwargs)
+        except TypeError:
+            # transformers 5.x requires mm_token_type_ids (0=text, 1=image, 2=video);
+            # derive it from the placeholder token ids (mirrors the processor output).
+            vlm_cfg = self.qwenvl.config
+            mm_token_type_ids = torch.zeros_like(input_ids, dtype=torch.int)
+            mm_token_type_ids[input_ids == vlm_cfg.image_token_id] = 1
+            video_token_id = getattr(vlm_cfg, "video_token_id", None)
+            if video_token_id is not None:
+                mm_token_type_ids[input_ids == video_token_id] = 2
+            position_ids, _ = self.qwenvl.model.get_rope_index(
+                mm_token_type_ids=mm_token_type_ids, **kwargs
+            )
         return position_ids
 
     def apply_mrope(self, query_states, key_states, position_ids):
