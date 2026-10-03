@@ -406,6 +406,69 @@ If you also set `global_batch_size` explicitly, it must be consistent with the c
 | `enable_fp32` | bool | `false` | Use float32 precision for the action expert. |
 | `enable_resume` | bool | `false` | Automatically resume training from the latest checkpoint in `output_dir`. |
 
+### LoRA post-training
+
+Set `train.lora_rank` to a positive integer to train LoRA adapters on the language
+backbone and action expert's attention projections. The default, `0`, keeps the
+existing full fine-tuning path. Vision, MoE expert weights, routing weights,
+normalization and auxiliary heads remain frozen. This is attention LoRA, not
+LoRA on the fused MoE expert tensors.
+
+For example, after setting the model, teacher and dataset paths in the RoboTwin
+config, run from the repository root:
+
+```bash
+bash train.sh tasks/vla/train_lingbotvla.py configs/vla/robotwin/robotwin.yaml \
+  --train.output_dir output/lora \
+  --train.lora_rank 8 --train.lora_alpha 16 \
+  --train.optimizer adamw --train.lr 1e-5 \
+  --train.lr_min 1e-5 --train.lr_decay_style constant \
+  --train.micro_batch_size 1 --train.global_batch_size 2 \
+  --train.gradient_accumulation_steps 1 \
+  --train.enable_gradient_checkpointing true \
+  --train.enable_full_shard true \
+  --train.use_compile false --train.attention_implementation eager
+```
+
+This batch-size example uses two data-parallel GPUs; adjust `global_batch_size`
+to `micro_batch_size × num_gpus × gradient_accumulation_steps`. LoRA reduces
+trainable parameters and optimizer state, but base weights, activations and
+teachers still consume memory. It does not guarantee that any configuration fits
+on a particular GPU or matches full fine-tuning's task success rate.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `train.lora_rank` | `0` | Adapter rank; zero disables LoRA. |
+| `train.lora_alpha` | `16` | Adapter scaling numerator; effective scale is alpha/rank. |
+| `train.lora_target_modules` | `q_proj,k_proj,v_proj,o_proj` | Comma-separated attention projections; select a subset if needed. |
+
+Use AdamW, `init_device: cuda`, DDP or FSDP2, and non-reentrant gradient
+checkpointing (`enable_reentrant: false`). Set `train_expert_only: false` because
+LoRA adapts attention in both branches. Start from the same pretrained weights
+and keep the model architecture and data normalization fixed when comparing runs.
+
+Training checkpoints keep the existing DCP model, optimizer and training state.
+Resume with the same LoRA settings and `enable_resume: true`, or supply
+`load_checkpoint_path`. The exported `global_step_<step>/hf_ckpt` contains merged
+weights and works with the existing deployment and evaluation commands. Its
+`adapter/` subdirectory contains the small adapter in this repository's format,
+routing correction buffers and training configuration. Keep the original base
+checkpoint when sharing this adapter; it must be applied to that base, not to the
+already merged checkpoint.
+
+```bash
+QWEN3VL_PATH=/path/to/Qwen3-VL-4B-Instruct \
+python -m deploy.lingbot_vla_v2_policy \
+  --model_path /path/to/original/base/checkpoint \
+  --adapter_path output/lora/checkpoints/global_step_1000/hf_ckpt/adapter \
+  --use_bf16 false --use_fp32 true
+```
+
+For RoboTwin comparisons, use the pinned simulator revision and FP32 inference
+described in [the evaluation guide](../../experiment/robotwin/README.md). A finite
+training loss or lower memory use alone does not establish task success-rate
+improvement.
+
 ### Train — MoE Parameters
 
 | Parameter | Type | Default | Description |

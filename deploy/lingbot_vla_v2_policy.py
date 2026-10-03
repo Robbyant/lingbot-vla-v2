@@ -196,6 +196,7 @@ class LingbotVLAv2Server:
         use_bf16=True,
         use_fp32=False,
         use_compile=False,
+        adapter_path=None,
     ) -> None:
         assert not (use_bf16 and use_fp32), 'Bfloat16 or Float32!!!'
         self.adaptive_ensemble_alpha = adaptive_ensemble_alpha
@@ -207,6 +208,7 @@ class LingbotVLAv2Server:
         self.task_description = None
 
         self.use_compile = use_compile
+        self.adapter_path = adapter_path
         apply_lingbot_qwen3_vl_patch()
 
         self.vla = self.load_vla(path_to_pi_model)
@@ -232,6 +234,10 @@ class LingbotVLAv2Server:
             with safe_open(file_path, framework="pt", device="cpu") as f:
                 for key in f.keys():
                     merged_weights[key] = f.get_tensor(key)
+        if self.adapter_path is not None:
+            from lingbotvla.utils.lora_utils import merge_vla_adapter_weights
+
+            merged_weights = merge_vla_adapter_weights(merged_weights, self.adapter_path)
         self.vla.load_state_dict(merged_weights, strict=strict)
 
     def merge_qwen_config(self, qwen_config):
@@ -274,6 +280,8 @@ class LingbotVLAv2Server:
         
         # load training config
         training_config_path = Path(path_to_pi_model).parent.parent.parent/'lingbotvla_cli.yaml'
+        if self.adapter_path is not None:
+            training_config_path = Path(self.adapter_path) / 'lingbotvla_cli.yaml'
         with open(training_config_path, 'r') as f:
             training_config = yaml.safe_load(f)
         f.close()
@@ -545,6 +553,7 @@ except ImportError:
 
 def main():
     parser = argparse.ArgumentParser(description="Launch the Qwen3VL LingbotVlaV2 WebSocket policy server")
+    parser.add_argument("--adapter_path", type=str, default=None, help="LoRA adapter directory; model_path must be its original base checkpoint.")
 
     parser.add_argument(
         "--model_path",
@@ -599,6 +608,7 @@ def main():
         use_bf16=args.use_bf16,
         use_fp32=args.use_fp32,
         use_compile=args.use_compile,
+        adapter_path=args.adapter_path,
     )
     model_server = WebsocketPolicyServer(model, port=args.port)
     model_server.serve_forever()

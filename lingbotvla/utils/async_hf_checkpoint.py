@@ -4,6 +4,7 @@ import shutil
 import time
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import Any, List, Sequence
 
@@ -322,6 +323,27 @@ class AsyncHFCheckpointSaver:
                 ema=ema,
             )
             save_kwargs = {"model_assets": model_assets}
+            lora_config = next(
+                (asset.vla_lora for asset in model_assets or () if getattr(asset, "vla_lora", None)), None
+            )
+            if lora_config is not None:
+                from lingbotvla.utils.lora_utils import merge_vla_lora_state_dict, save_vla_adapter
+
+                save_vla_adapter(
+                    os.path.join(tmp_dir, "adapter"),
+                    state_dict,
+                    lora_config,
+                    save_dtype=torch.float32 if enable_fp32 else torch.bfloat16,
+                )
+                shutil.copy2(os.path.join(output_dir, "lingbotvla_cli.yaml"), os.path.join(tmp_dir, "adapter"))
+                state_dict = merge_vla_lora_state_dict(state_dict, lora_config)
+                assets = []
+                for asset in model_assets:
+                    if getattr(asset, "vla_lora", None):
+                        asset = deepcopy(asset)
+                        del asset.vla_lora
+                    assets.append(asset)
+                save_kwargs["model_assets"] = assets
             if enable_fp32:
                 save_kwargs["save_dtype"] = torch.float32
             save_model_weights(tmp_dir, state_dict, **save_kwargs)

@@ -118,6 +118,9 @@ def get_moe_param_groups(model: "torch.nn.Module", args_train) -> Optional[List[
 
 @dataclass
 class MyTrainingArguments(TrainingArguments):
+    lora_rank: int = field(default=0, metadata={"help": "Attention LoRA rank. Zero keeps full fine-tuning."})
+    lora_alpha: int = field(default=16, metadata={"help": "LoRA scaling numerator."})
+    lora_target_modules: str = field(default="q_proj,k_proj,v_proj,o_proj")
     freeze_vit: bool = field(
         default=False,
         metadata={"help": "Whether or not to freeze the vit parameters."},
@@ -332,6 +335,15 @@ class Arguments:
 
 def main():
     args = parse_args(Arguments)
+    if args.train.lora_rank:
+        if args.train.init_device != "cuda" or args.train.data_parallel_mode not in ("ddp", "fsdp2"):
+            raise ValueError("VLA LoRA requires init_device=cuda and data_parallel_mode=ddp or fsdp2.")
+        if args.train.enable_reentrant:
+            raise ValueError("VLA LoRA requires non-reentrant gradient checkpointing (enable_reentrant=false).")
+        if args.train.train_expert_only:
+            raise ValueError("VLA LoRA adapts both language and action attention; set train_expert_only=false.")
+        if args.train.optimizer != "adamw":
+            raise ValueError("VLA LoRA currently supports optimizer=adamw.")
     logger.info(f"Process rank: {args.train.global_rank}, world size: {args.train.world_size}")
     logger.info_rank0(json.dumps(asdict(args), indent=2))
     torch.cuda.set_device(f"cuda:{args.train.local_rank}")
@@ -379,6 +391,13 @@ def main():
         config_kwargs=config_kwargs,
         moe_implementation=getattr(args.model, 'moe_implementation', None),
     )
+    if args.train.lora_rank:
+        from lingbotvla.utils.lora_utils import configure_vla_lora
+
+        configure_vla_lora(model, args.train.lora_rank, args.train.lora_alpha, args.train.lora_target_modules)
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in model.parameters())
+        logger.info_rank0(f"LoRA trainable parameters: {trainable_params:,}/{total_params:,}.")
     use_depth_align = True if args.train.align_params != {} else False
     use_future_depth = args.train.align_params.get('depth', {}).get('use_future_depth', False)
     use_future_video = use_depth_align and args.train.align_params.get('use_future_video', False)
