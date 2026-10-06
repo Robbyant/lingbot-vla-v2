@@ -190,6 +190,28 @@ if __name__ == "__main__":
     logger.info(f"Process rank: {rank}, world size: {world_size}")
     logger.info_rank0(json.dumps(asdict(args), indent=2))
 
+    # ---- 提前校验输出路径 ----
+    if args.data.norm_path is None:
+        raise ValueError(
+            "❌ --data.norm_path must be specified. "
+            "Example: --data.norm_path assets/norm_stats/your_dataset.json"
+        )
+    output_norm_path = Path(args.data.norm_path)
+    if rank == 0:
+        # 确保父目录存在并可写
+        output_norm_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            # 快速测试文件是否可创建/删除
+            output_norm_path.touch()
+            output_norm_path.unlink()
+        except Exception as e:
+            raise RuntimeError(
+                f"❌ Cannot write to {output_norm_path}. Check permissions or path. Error: {e}"
+            )
+    if world_size > 1:
+        dist.barrier()  # 等待 rank0 完成路径准备
+    # ---------------------------------
+
     logger.info_rank0("Prepare data")
     stats = None
 
