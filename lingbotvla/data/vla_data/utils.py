@@ -119,6 +119,7 @@ class FeatureTransform:
             'task_index',
             'action_is_pad',
             'task',
+            'future_video_effective_fps',
         ])
 
         target_features  = {'states':[], 'actions':[], 'images':[]}
@@ -463,7 +464,12 @@ class FeatureTransform:
         chunk_joint_mask = batch_dict['chunk_joint_mask']
         assert self.model_config.max_action_dim >= chunk_joint_mask.shape[-1], f"max_action_dim is smaller than the action joint dimension: {self.model_config.max_action_dim} < {chunk_joint_mask.shape[-1]}"
         chunk_joint_mask = F.pad(chunk_joint_mask, (0, self.model_config.max_action_dim - chunk_joint_mask.shape[-1])).to(dtype=torch.bool)
-        
+
+        future_video_effective_fps = batch_dict.get(
+            "future_video_effective_fps",
+            None,
+        )
+
         del batch_dict
         batch_dict = {
                 'images': images,
@@ -477,6 +483,12 @@ class FeatureTransform:
                 'state_joint_mask': state_joint_mask,
                 'action_joint_mask': action_joint_mask,
             }
+
+        if future_video_effective_fps is not None:
+            batch_dict["future_video_effective_fps"] = (
+                future_video_effective_fps
+            )
+
         if image_grid_thw is not None:
             batch_dict['image_grid_thw'] = image_grid_thw
 
