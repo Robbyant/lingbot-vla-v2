@@ -968,9 +968,14 @@ class FlowMatchingV2(FlowMatchingV1):
             deepstack_visual_embeds=deepstack_visual_embeds,
         )
 
-        dt = torch.tensor(-1.0 / self.config.num_steps, dtype=dtype, device=device)
+        # The flow-matching time only enters the model through a sinusoidal
+        # embedding, so build the grid in FP32 whatever the state dtype is.
+        # Built in the state dtype it is quantised: under BF16 the schedule
+        # becomes 1.0, 0.898, 0.797, ..., 0.095 with dt = -0.1001, so every
+        # denoise step is conditioned on a shifted time.
+        dt = torch.tensor(-1.0 / self.config.num_steps, dtype=torch.float32, device=device)
         x_t = noise
-        time = torch.tensor(1.0, dtype=dtype, device=device)
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
         count = 0
         predict_velocity_fn = self.predict_velocity
         if getattr(self, "_use_compile_predict_velocity", False):
@@ -996,7 +1001,9 @@ class FlowMatchingV2(FlowMatchingV1):
                 prefix_position_ids=prefix_position_ids,
             )
 
-            x_t += dt * v_t
+            # dt is FP32 now, so the update has to come back to the state dtype
+            # before the in-place add. x_t itself is unchanged in dtype.
+            x_t += (dt * v_t).to(x_t.dtype)
             time += dt
         print(f"Denoise {count} steps")
         return x_t
