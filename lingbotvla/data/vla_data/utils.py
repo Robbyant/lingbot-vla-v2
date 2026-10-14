@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from ...utils import logging as logging_utils
 from .transform import Normalizer, prepare_images, prepare_state, prepare_language, prepare_action, expert_visual_transform
 from .ee_pose_transform import *
+from .ee_pose_transform import _is_quaternion_relative_type
 from typing import Dict, List, Optional
 import ast
 import torch.nn.functional as F
@@ -227,7 +228,15 @@ class FeatureTransform:
                         if 'velocity' in target_feature or 'effector.position' in target_feature:
                             assert not action_subtract_state[target_feature], f"{target_feature} cannot be subtracted from state"
 
-                        action_relative_type[target_feature] = feature_convert_info[target_feature].pop('relative_type', 'quaternion_local')
+                        default_relative_type = 'quaternion_local' if 'end.position' in target_feature else 'subtract'
+                        relative_type = feature_convert_info[target_feature].pop('relative_type', default_relative_type)
+                        if (action_subtract_state[target_feature]
+                                and _is_quaternion_relative_type(relative_type)
+                                and 'end.position' not in target_feature):
+                            raise ValueError(
+                                f"{target_feature}: {relative_type} requires end.position when subtract_state is true"
+                            )
+                        action_relative_type[target_feature] = relative_type
                         if_convert_from_state = feature_convert_info[target_feature].pop('convert_from_state', False)
                         if if_convert_from_state:
                             actions_convert_from_state.add(target_feature)
