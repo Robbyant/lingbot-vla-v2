@@ -283,6 +283,24 @@ class MyTrainingArguments(TrainingArguments):
         default=False,
         metadata={"help": "Whether to apply FSDP2 for VLM."},
     )
+    enable_compiled_rmsnorm: bool = field(
+        default=False,
+        metadata={"help": "Run every Qwen3VLTextRMSNorm of the VLM through one torch.compile'd function: 1 Triton "
+                          "kernel forward and 3 backward instead of 8 and 15 eager kernels. Qwen3-VL VLMs only. "
+                          "Measured with enable_gradient_checkpointing true, where the decoder layers run eagerly."},
+    )
+    enable_fused_qkv_prep: bool = field(
+        default=False,
+        metadata={"help": "Prepare the joint VLM / action-expert attention inputs with one Triton kernel per q/k/v "
+                          "tensor (cast + concat + RoPE + transpose to the flex layout, forward and backward) and run "
+                          "flex attention without padding to the block size. LingbotVLAV2Config (Qwen3-VL) only; "
+                          "needs attention_implementation flex_cached."},
+    )
+    enable_fused_swiglu: bool = field(
+        default=False,
+        metadata={"help": "Compute silu(gate) * up of every Qwen3VLTextMLP with one Triton kernel forward and one "
+                          "backward, bit-exact with the eager F.silu(gate) * up. Qwen3-VL VLMs only."},
+    )
 
 @dataclass
 class MyDataArguments(DataArguments):
@@ -379,6 +397,29 @@ def main():
         config_kwargs=config_kwargs,
         moe_implementation=getattr(args.model, 'moe_implementation', None),
     )
+    if args.train.enable_compiled_rmsnorm:
+        # build_foundation_model compiles the norm only for a Qwen3-VL VLM; refuse instead of silently ignoring it
+        from lingbotvla.models.vla.lingbot_vla.qwen3vl_in_vla import compiled_rmsnorm_enabled
+        if not compiled_rmsnorm_enabled():
+            raise ValueError("enable_compiled_rmsnorm applies to a Qwen3-VL VLM (Qwen3VLTextRMSNorm) only")
+    if args.train.enable_fused_qkv_prep:
+        # What QwenvlWithExpertV2Model.forward reads: a switch that does not arrive there (undeclared config field,
+        # attention_implementation other than flex_cached) would silently run the unfused path.
+        qcfg = model.model.qwenvl_with_expert.config
+        if not (getattr(qcfg, "enable_fused_qkv_prep", False) and qcfg.attention_implementation == "flex_cached"):
+            raise ValueError(
+                "enable_fused_qkv_prep would not take effect (it needs LingbotVLAV2Config and "
+                "attention_implementation 'flex_cached'): the model config has "
+                f"enable_fused_qkv_prep={getattr(qcfg, 'enable_fused_qkv_prep', None)}, "
+                f"attention_implementation={qcfg.attention_implementation!r}"
+            )
+    if args.train.enable_fused_swiglu:
+        from lingbotvla.ops.swiglu import apply_fused_swiglu
+        n_patched = apply_fused_swiglu(model)
+        n_layers = model.model.qwenvl_with_expert.qwenvl.config.text_config.num_hidden_layers
+        if n_patched != n_layers:
+            raise ValueError(f"enable_fused_swiglu: patched {n_patched} Qwen3VLTextMLP modules, expected {n_layers}")
+        logger.info_rank0(f"enable_fused_swiglu: patched {n_patched} Qwen3VLTextMLP modules")
     use_depth_align = True if args.train.align_params != {} else False
     use_future_depth = args.train.align_params.get('depth', {}).get('use_future_depth', False)
     use_future_video = use_depth_align and args.train.align_params.get('use_future_video', False)

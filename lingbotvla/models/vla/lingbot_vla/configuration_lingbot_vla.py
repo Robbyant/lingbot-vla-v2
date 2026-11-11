@@ -84,6 +84,7 @@ class LingbotVLAConfig(PretrainedConfig):
         qwen3vl_use_vision_boundaries: bool = False,
         precompute_grid_thw: bool = False,
         use_qwen3_fixed_grid_cache: bool = False,
+        enable_fused_qkv_prep: bool = False,
 
         use_lm_head: bool = False,
         vocab_size: int = 0,
@@ -166,6 +167,8 @@ class LingbotVLAConfig(PretrainedConfig):
         self.qwen3vl_use_vision_boundaries = qwen3vl_use_vision_boundaries
         self.precompute_grid_thw = precompute_grid_thw
         self.use_qwen3_fixed_grid_cache = use_qwen3_fixed_grid_cache
+        # --train.enable_fused_qkv_prep; only declared arguments are kept (super().__init__() gets no kwargs)
+        self.enable_fused_qkv_prep = enable_fused_qkv_prep
         self.use_lm_head = use_lm_head
         if vocab_size == 0:
             if vlm_repo_id and 'paligemma' in vlm_repo_id.lower():
