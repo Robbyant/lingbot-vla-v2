@@ -83,6 +83,7 @@ class LingbotVLAConfig(PretrainedConfig):
         return_image_grid_thw: bool = False,
         qwen3vl_use_vision_boundaries: bool = False,
         precompute_grid_thw: bool = False,
+        enable_vision_position_cache: bool = False,
         use_qwen3_fixed_grid_cache: bool = False,
 
         use_lm_head: bool = False,
@@ -165,6 +166,7 @@ class LingbotVLAConfig(PretrainedConfig):
         self.return_image_grid_thw = return_image_grid_thw
         self.qwen3vl_use_vision_boundaries = qwen3vl_use_vision_boundaries
         self.precompute_grid_thw = precompute_grid_thw
+        self.enable_vision_position_cache = enable_vision_position_cache
         self.use_qwen3_fixed_grid_cache = use_qwen3_fixed_grid_cache
         self.use_lm_head = use_lm_head
         if vocab_size == 0:

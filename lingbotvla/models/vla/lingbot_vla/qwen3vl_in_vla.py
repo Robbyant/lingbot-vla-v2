@@ -30,6 +30,13 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
 
 logger = logging.get_logger(__name__)
 
+# Retain the Transformers implementation even if the LingBot patch is applied
+# repeatedly. The optimization is selected per visual-model instance below.
+_original_fast_pos_embed_interpolate = getattr(
+    Qwen3VLVisionModel, "_lingbot_original_fast_pos_embed_interpolate",
+    Qwen3VLVisionModel.fast_pos_embed_interpolate,
+)
+
 
 def _qwen3vl_no_init_weights(self, module):
     return
@@ -335,6 +342,8 @@ def get_lingbot_grid_metadata(self, grid_thw):
 
 
 def fast_pos_embed_interpolate_cached(self, grid_thw, metadata=None):
+    if not getattr(self.config, "enable_vision_position_cache", False):
+        return _original_fast_pos_embed_interpolate(self, grid_thw)
     if metadata is None:
         metadata = self.get_lingbot_grid_metadata(grid_thw)
     # Re-evaluate the learned table on every call so optimizer updates and gradients
@@ -346,9 +355,25 @@ def fast_pos_embed_interpolate_cached(self, grid_thw, metadata=None):
 
 @torch.compiler.disable
 def preprcess_grid_thw(self, grid_thw: torch.Tensor):
-    metadata = self.get_lingbot_grid_metadata(grid_thw)
-    return (None, metadata["position_embeddings"], metadata["cu_seqlens"],
-            metadata["split_sizes"], metadata["max_seqlen"])
+    if getattr(self.config, "enable_vision_position_cache", False):
+        metadata = self.get_lingbot_grid_metadata(grid_thw)
+        return (None, metadata["position_embeddings"], metadata["cu_seqlens"],
+                metadata["split_sizes"], metadata["max_seqlen"])
+
+    # Preserve the pre-optimization preprocessing path and its legacy caller.
+    rotary_pos_emb = self.rot_pos_emb(grid_thw)
+    seq_len = int(torch.prod(grid_thw, dim=1).sum().item())
+    rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
+    emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+    position_embeddings = (emb.cos(), emb.sin())
+    cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
+        dim=0,
+        dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
+    )
+    cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+    split_sizes = (grid_thw.prod(-1) // self.spatial_merge_size**2).tolist()
+    max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
+    return None, position_embeddings, cu_seqlens, split_sizes, max_seqlen
 
 
 def forward_without_grid_thw(
@@ -362,21 +387,27 @@ def forward_without_grid_thw(
     **kwargs,
 ) -> torch.Tensor:
     metadata = kwargs.pop("grid_metadata", None)
+    use_position_cache = getattr(self.config, "enable_vision_position_cache", False)
     needs_position_data = (
         pos_embeds is None or position_embeddings is None or cu_seqlens is None or max_seqlen is None
     )
     # A complete precomputed input must also work without grid_thw, as before.
     # Partial inputs retain the original all-or-recompute behavior.
-    if needs_position_data and metadata is None:
-        if grid_thw is None:
-            raise ValueError("grid_thw is required unless all position inputs are provided.")
+    if needs_position_data and grid_thw is None and (not use_position_cache or metadata is None):
+        raise ValueError("grid_thw is required unless all position inputs are provided.")
+    if use_position_cache and needs_position_data and metadata is None:
         metadata = self.get_lingbot_grid_metadata(grid_thw)
     hidden_states = self.patch_embed(hidden_states)
 
     if needs_position_data:
-        position_embeddings = metadata["position_embeddings"]
-        cu_seqlens, max_seqlen = metadata["cu_seqlens"], metadata["max_seqlen"]
-        pos_embeds = self.fast_pos_embed_interpolate(grid_thw, metadata)
+        if use_position_cache:
+            position_embeddings = metadata["position_embeddings"]
+            cu_seqlens, max_seqlen = metadata["cu_seqlens"], metadata["max_seqlen"]
+            pos_embeds = self.fast_pos_embed_interpolate(grid_thw, metadata)
+        else:
+            pos_embeds, position_embeddings, cu_seqlens, _, max_seqlen = self.preprcess_grid_thw(grid_thw)
+    if pos_embeds is None:
+        pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
 
     hidden_states = hidden_states + pos_embeds
     seq_len, _ = hidden_states.size()
@@ -413,4 +444,5 @@ def apply_lingbot_qwen3_vl_patch():
     hf_qwen3vl.Qwen3VLVisionModel.forward = forward_without_grid_thw
     hf_qwen3vl.Qwen3VLVisionModel.preprcess_grid_thw = preprcess_grid_thw
     hf_qwen3vl.Qwen3VLVisionModel.get_lingbot_grid_metadata = get_lingbot_grid_metadata
+    hf_qwen3vl.Qwen3VLVisionModel._lingbot_original_fast_pos_embed_interpolate = _original_fast_pos_embed_interpolate
     hf_qwen3vl.Qwen3VLVisionModel.fast_pos_embed_interpolate = fast_pos_embed_interpolate_cached
