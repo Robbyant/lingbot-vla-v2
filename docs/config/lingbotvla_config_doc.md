@@ -124,6 +124,7 @@ robot configs, and normalization statistics, see
 | `train.module_fsdp_enable` | bool | `True` | Enable module-level FSDP wrapping. |
 | `train.vlm_fsdp` | bool | `False` | Whether to apply FSDP2 to the VLM. |
 | `train.use_compile` | bool | `False` | Whether to enable `torch.compile`. |
+| `train.enable_compiled_rmsnorm` | bool | `False` | Run every Qwen3-VL text RMSNorm through one `torch.compile`d function (1 Triton kernel forward, 3 backward). Qwen3-VL VLMs only; the speed-up was measured with `train.enable_gradient_checkpointing: true`. |
 | `train.enable_reentrant` | bool | `False` | Use reentrant gradient checkpointing. |
 | `train.allow_partial_checkpoint` | bool | `False` | Allow partial checkpoint loading and skip missing keys when model structure differs. |
 | `train.enable_forward_prefetch` | bool | `True` | Enable forward prefetch for FSDP1. |

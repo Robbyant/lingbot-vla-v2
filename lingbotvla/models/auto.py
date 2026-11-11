@@ -71,7 +71,7 @@ def build_foundation_model(
     vlm_key = f"{vlm_repo_id or ''} {tokenizer_path_for_patch or ''}".lower()
     if "qwen3" in vlm_key and "vl" in vlm_key:
         from lingbotvla.models.vla.lingbot_vla.qwen3vl_in_vla import apply_lingbot_qwen3_vl_patch
-        apply_lingbot_qwen3_vl_patch()
+        apply_lingbot_qwen3_vl_patch(compile_rmsnorm=bool(config_kwargs.get("enable_compiled_rmsnorm", False)))
     else:
         from lingbotvla.models.vla.lingbot_vla.qwenvl_in_vla import apply_lingbot_qwen25_vl_patch
         apply_lingbot_qwen25_vl_patch()

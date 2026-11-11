@@ -402,6 +402,7 @@ If you also set `global_batch_size` explicitly, it must be consistent with the c
 | `vlm_fsdp` | bool | `false` | Apply FSDP2 to the VLM. |
 | `attention_implementation` | str | `"flex"` | VLA attention implementation. Supported values include `"flex"`, `"flex_cached"`, and `"eager"`. |
 | `use_compile` | bool | `false` | Enable `torch.compile` for training acceleration. |
+| `enable_compiled_rmsnorm` | bool | `false` | Run every Qwen3-VL text RMSNorm through one `torch.compile`d function (1 Triton kernel forward, 3 backward). Qwen3-VL VLMs only; the speed-up was measured with `enable_gradient_checkpointing: true`. |
 | `ckpt_manager` | str | `"dcp"` | Checkpoint backend. Options: `"dcp"` (PyTorch Distributed Checkpoint), `"bytecheckpoint"`. |
 | `enable_fp32` | bool | `false` | Use float32 precision for the action expert. |
 | `enable_resume` | bool | `false` | Automatically resume training from the latest checkpoint in `output_dir`. |

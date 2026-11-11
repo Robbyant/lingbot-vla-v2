@@ -283,6 +283,12 @@ class MyTrainingArguments(TrainingArguments):
         default=False,
         metadata={"help": "Whether to apply FSDP2 for VLM."},
     )
+    enable_compiled_rmsnorm: bool = field(
+        default=False,
+        metadata={"help": "Run every Qwen3VLTextRMSNorm of the VLM through one torch.compile'd function: 1 Triton "
+                          "kernel forward and 3 backward instead of 8 and 15 eager kernels. Qwen3-VL VLMs only. "
+                          "Measured with enable_gradient_checkpointing true, where the decoder layers run eagerly."},
+    )
 
 @dataclass
 class MyDataArguments(DataArguments):
@@ -379,6 +385,11 @@ def main():
         config_kwargs=config_kwargs,
         moe_implementation=getattr(args.model, 'moe_implementation', None),
     )
+    if args.train.enable_compiled_rmsnorm:
+        # build_foundation_model compiles the norm only for a Qwen3-VL VLM; refuse instead of silently ignoring it
+        from lingbotvla.models.vla.lingbot_vla.qwen3vl_in_vla import compiled_rmsnorm_enabled
+        if not compiled_rmsnorm_enabled():
+            raise ValueError("enable_compiled_rmsnorm applies to a Qwen3-VL VLM (Qwen3VLTextRMSNorm) only")
     use_depth_align = True if args.train.align_params != {} else False
     use_future_depth = args.train.align_params.get('depth', {}).get('use_future_depth', False)
     use_future_video = use_depth_align and args.train.align_params.get('use_future_video', False)
