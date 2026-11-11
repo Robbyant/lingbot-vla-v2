@@ -126,6 +126,7 @@ robot configs, and normalization statistics, see
 | `train.use_compile` | bool | `False` | Whether to enable `torch.compile`. |
 | `train.enable_compiled_rmsnorm` | bool | `False` | Run every Qwen3-VL text RMSNorm through one `torch.compile`d function (1 Triton kernel forward, 3 backward). Qwen3-VL VLMs only; the speed-up was measured with `train.enable_gradient_checkpointing: true`. |
 | `train.enable_fused_qkv_prep` | bool | `False` | Prepare the joint VLM / action-expert attention q/k/v with one Triton kernel per tensor and run flex attention without padding. LingBot-VLA V2 (Qwen3-VL) only; needs `train.attention_implementation: flex_cached`. |
+| `train.enable_fused_swiglu` | bool | `False` | Compute the SwiGLU activation of the Qwen3-VL text MLP with one Triton kernel forward and one backward, bit-identical to eager. Qwen3-VL VLMs only. |
 | `train.enable_reentrant` | bool | `False` | Use reentrant gradient checkpointing. |
 | `train.allow_partial_checkpoint` | bool | `False` | Allow partial checkpoint loading and skip missing keys when model structure differs. |
 | `train.enable_forward_prefetch` | bool | `True` | Enable forward prefetch for FSDP1. |

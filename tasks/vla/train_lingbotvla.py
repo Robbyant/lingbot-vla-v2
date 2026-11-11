@@ -296,6 +296,11 @@ class MyTrainingArguments(TrainingArguments):
                           "flex attention without padding to the block size. LingbotVLAV2Config (Qwen3-VL) only; "
                           "needs attention_implementation flex_cached."},
     )
+    enable_fused_swiglu: bool = field(
+        default=False,
+        metadata={"help": "Compute silu(gate) * up of every Qwen3VLTextMLP with one Triton kernel forward and one "
+                          "backward, bit-exact with the eager F.silu(gate) * up. Qwen3-VL VLMs only."},
+    )
 
 @dataclass
 class MyDataArguments(DataArguments):
@@ -408,6 +413,13 @@ def main():
                 f"enable_fused_qkv_prep={getattr(qcfg, 'enable_fused_qkv_prep', None)}, "
                 f"attention_implementation={qcfg.attention_implementation!r}"
             )
+    if args.train.enable_fused_swiglu:
+        from lingbotvla.ops.swiglu import apply_fused_swiglu
+        n_patched = apply_fused_swiglu(model)
+        n_layers = model.model.qwenvl_with_expert.qwenvl.config.text_config.num_hidden_layers
+        if n_patched != n_layers:
+            raise ValueError(f"enable_fused_swiglu: patched {n_patched} Qwen3VLTextMLP modules, expected {n_layers}")
+        logger.info_rank0(f"enable_fused_swiglu: patched {n_patched} Qwen3VLTextMLP modules")
     use_depth_align = True if args.train.align_params != {} else False
     use_future_depth = args.train.align_params.get('depth', {}).get('use_future_depth', False)
     use_future_video = use_depth_align and args.train.align_params.get('use_future_video', False)
