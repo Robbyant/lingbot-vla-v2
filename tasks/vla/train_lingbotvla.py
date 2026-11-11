@@ -269,7 +269,15 @@ class MyTrainingArguments(TrainingArguments):
     )
     precompute_grid_thw: bool = field(
         default=False,
-        metadata={"help": "Whether to precompute and cache grid_thw-derived tensors (rotary_pos_emb, window_index, etc.) for fixed-resolution training."},
+        metadata={"help": "Legacy fixed-resolution grid precomputation; used by LingBot V2 only when enable_vision_position_cache is false."},
+    )
+    enable_fine_grained_fsdp: bool = field(
+        default=False,
+        metadata={"help": "Use additional FSDP2 units for vision stages, token embeddings, alignment heads and shared projections; requires vlm_fsdp."},
+    )
+    enable_vision_position_cache: bool = field(
+        default=False,
+        metadata={"help": "Enable LingBot V2 full-grid visual metadata caching and vectorized position interpolation; replaces legacy precompute_grid_thw handling."},
     )
     use_moe_expert_lr: bool = field(
         default=False,
@@ -487,6 +495,8 @@ def main():
         use_depth_align=use_depth_align,
         split_fused_experts_from_decoder_fsdp=args.train.split_fused_experts_from_decoder_fsdp,
         vlm_fsdp=args.train.vlm_fsdp,
+        use_compile=args.train.use_compile,
+        enable_fine_grained_fsdp=args.train.enable_fine_grained_fsdp,
         use_future_image=args.data.use_future_image,
     )
     logger.info_rank0(model)

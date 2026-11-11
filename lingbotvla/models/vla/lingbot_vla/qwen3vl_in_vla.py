@@ -30,6 +30,13 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
 
 logger = logging.get_logger(__name__)
 
+# Retain the Transformers implementation even if the LingBot patch is applied
+# repeatedly. The optimization is selected per visual-model instance below.
+_original_fast_pos_embed_interpolate = getattr(
+    Qwen3VLVisionModel, "_lingbot_original_fast_pos_embed_interpolate",
+    Qwen3VLVisionModel.fast_pos_embed_interpolate,
+)
+
 
 def _qwen3vl_no_init_weights(self, module):
     return
@@ -258,14 +265,107 @@ class Qwen3VLForConditionalGeneration(_Qwen3VLForConditionalGeneration, Generati
 
 
 @torch.compiler.disable
-def preprcess_grid_thw(self, grid_thw: torch.Tensor):
-    rotary_pos_emb = self.rot_pos_emb(grid_thw)
+def get_lingbot_grid_metadata(self, grid_thw):
+    """Cache only weight-independent metadata, keyed by the complete visual grid.
 
+    LingBot V2 transfers the complete input grid to CPU once. External CUDA grids
+    use one explicit D2H transfer rather than scalar synchronizations in a loop.
+    Cache entries are not buffers/state_dict values and never contain a learned
+    position embedding or an autograd graph.
+    """
+    from collections import OrderedDict
+
+    grid = tuple(tuple(int(v) for v in row) for row in grid_thw.detach().cpu().tolist())
+    weight = self.pos_embed.weight
+    inv_freq = self.rotary_pos_emb.inv_freq
+    key = (grid, weight.device, weight.dtype, self.spatial_merge_size,
+           self.num_grid_per_side, inv_freq.device, inv_freq.dtype,
+           inv_freq.data_ptr(), inv_freq._version, torch.is_inference_mode_enabled())
+    cache = getattr(self, "_lingbot_grid_metadata_cache", None)
+    if cache is None:
+        cache = self._lingbot_grid_metadata_cache = OrderedDict()
+    if key in cache:
+        cache.move_to_end(key)
+        return cache[key]
+
+    merge = self.spatial_merge_size
+    indices, weights, coords, permutation = [], [], [], []
+    lengths, split_sizes = [], []
+    offset = 0
+    with torch.no_grad():
+        for frames, height, width in grid:
+            if frames <= 0 or height <= 0 or width <= 0 or height % merge or width % merge:
+                raise ValueError("Visual grid dimensions must be positive and divisible by spatial_merge_size")
+            # Match the original CPU linspace and the four-corner summation order.
+            hs = torch.linspace(0, self.num_grid_per_side - 1, height)
+            ws = torch.linspace(0, self.num_grid_per_side - 1, width)
+            hf, wf = hs.int(), ws.int()
+            hc = (hf + 1).clamp(max=self.num_grid_per_side - 1)
+            wc = (wf + 1).clamp(max=self.num_grid_per_side - 1)
+            dh, dw = hs - hf, ws - wf
+            indices.append(torch.stack([
+                (hf[:, None] * self.num_grid_per_side + wf[None, :]).flatten(),
+                (hf[:, None] * self.num_grid_per_side + wc[None, :]).flatten(),
+                (hc[:, None] * self.num_grid_per_side + wf[None, :]).flatten(),
+                (hc[:, None] * self.num_grid_per_side + wc[None, :]).flatten(),
+            ]))
+            weights.append(torch.stack([
+                ((1 - dh)[:, None] * (1 - dw)[None, :]).flatten(),
+                ((1 - dh)[:, None] * dw[None, :]).flatten(),
+                (dh[:, None] * (1 - dw)[None, :]).flatten(),
+                (dh[:, None] * dw[None, :]).flatten(),
+            ]))
+            order = torch.arange(height * width).view(height // merge, merge, width // merge, merge)
+            order = order.permute(0, 2, 1, 3).reshape(-1)
+            coords.append(torch.stack((order // width, order % width), -1).repeat(frames, 1))
+            permutation.append((order + offset).repeat(frames))
+            offset += height * width
+            lengths.extend([height * width] * frames)
+            split_sizes.append(frames * height * width // (merge * merge))
+        pos_ids = torch.cat(coords).to(inv_freq.device, dtype=torch.long)
+        rotary = self.rotary_pos_emb(max(max(h, w) for _, h, w in grid))[pos_ids].flatten(1)
+        emb = torch.cat((rotary, rotary), dim=-1)
+        cumulative = torch.tensor([0] + lengths, dtype=torch.int32).cumsum(0, dtype=torch.int32)
+        metadata = dict(
+            indices=torch.cat(indices, dim=1).to(weight.device, dtype=torch.long),
+            weights=torch.cat(weights, dim=1).to(weight.device, dtype=weight.dtype),
+            permutation=torch.cat(permutation).to(weight.device, dtype=torch.long),
+            position_embeddings=(emb.cos(), emb.sin()),
+            cu_seqlens=cumulative.to(weight.device),
+            split_sizes=tuple(split_sizes), max_seqlen=max(lengths),
+        )
+    cache[key] = metadata
+    # Bound dynamic-resolution workloads; a different device/dtype cannot reuse a stale entry.
+    if len(cache) > 4:
+        cache.popitem(last=False)
+    return metadata
+
+
+def fast_pos_embed_interpolate_cached(self, grid_thw, metadata=None):
+    if not getattr(self.config, "enable_vision_position_cache", False):
+        return _original_fast_pos_embed_interpolate(self, grid_thw)
+    if metadata is None:
+        metadata = self.get_lingbot_grid_metadata(grid_thw)
+    # Re-evaluate the learned table on every call so optimizer updates and gradients
+    # remain live. Preserve the original BF16 multiply/add rounding order.
+    corners = self.pos_embed(metadata["indices"]) * metadata["weights"][:, :, None]
+    positions = corners[0] + corners[1] + corners[2] + corners[3]
+    return positions.index_select(0, metadata["permutation"])
+
+
+@torch.compiler.disable
+def preprcess_grid_thw(self, grid_thw: torch.Tensor):
+    if getattr(self.config, "enable_vision_position_cache", False):
+        metadata = self.get_lingbot_grid_metadata(grid_thw)
+        return (None, metadata["position_embeddings"], metadata["cu_seqlens"],
+                metadata["split_sizes"], metadata["max_seqlen"])
+
+    # Preserve the pre-optimization preprocessing path and its legacy caller.
+    rotary_pos_emb = self.rot_pos_emb(grid_thw)
     seq_len = int(torch.prod(grid_thw, dim=1).sum().item())
     rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
     emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
     position_embeddings = (emb.cos(), emb.sin())
-
     cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
         dim=0,
         dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
@@ -286,10 +386,26 @@ def forward_without_grid_thw(
     max_seqlen: Optional[int] = None,
     **kwargs,
 ) -> torch.Tensor:
+    metadata = kwargs.pop("grid_metadata", None)
+    use_position_cache = getattr(self.config, "enable_vision_position_cache", False)
+    needs_position_data = (
+        pos_embeds is None or position_embeddings is None or cu_seqlens is None or max_seqlen is None
+    )
+    # A complete precomputed input must also work without grid_thw, as before.
+    # Partial inputs retain the original all-or-recompute behavior.
+    if needs_position_data and grid_thw is None and (not use_position_cache or metadata is None):
+        raise ValueError("grid_thw is required unless all position inputs are provided.")
+    if use_position_cache and needs_position_data and metadata is None:
+        metadata = self.get_lingbot_grid_metadata(grid_thw)
     hidden_states = self.patch_embed(hidden_states)
 
-    if pos_embeds is None or position_embeddings is None or cu_seqlens is None or max_seqlen is None:
-        pos_embeds, position_embeddings, cu_seqlens, _, max_seqlen = self.preprcess_grid_thw(grid_thw)
+    if needs_position_data:
+        if use_position_cache:
+            position_embeddings = metadata["position_embeddings"]
+            cu_seqlens, max_seqlen = metadata["cu_seqlens"], metadata["max_seqlen"]
+            pos_embeds = self.fast_pos_embed_interpolate(grid_thw, metadata)
+        else:
+            pos_embeds, position_embeddings, cu_seqlens, _, max_seqlen = self.preprcess_grid_thw(grid_thw)
     if pos_embeds is None:
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
 
@@ -327,3 +443,6 @@ def apply_lingbot_qwen3_vl_patch():
     hf_qwen3vl.Qwen3VLVisionBlock = Qwen3VLVisionBlock
     hf_qwen3vl.Qwen3VLVisionModel.forward = forward_without_grid_thw
     hf_qwen3vl.Qwen3VLVisionModel.preprcess_grid_thw = preprcess_grid_thw
+    hf_qwen3vl.Qwen3VLVisionModel.get_lingbot_grid_metadata = get_lingbot_grid_metadata
+    hf_qwen3vl.Qwen3VLVisionModel._lingbot_original_fast_pos_embed_interpolate = _original_fast_pos_embed_interpolate
+    hf_qwen3vl.Qwen3VLVisionModel.fast_pos_embed_interpolate = fast_pos_embed_interpolate_cached

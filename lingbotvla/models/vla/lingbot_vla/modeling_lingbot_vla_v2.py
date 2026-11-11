@@ -130,7 +130,20 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         vlm_config._attn_implementation = "flash_attention_2"
         vlm_config.text_config._attn_implementation = "flash_attention_2"
         vlm_config.vision_config._attn_implementation = self.config.vit_attn_implementation
+        vlm_config.vision_config.enable_vision_position_cache = getattr(
+            self.config, "enable_vision_position_cache", False,
+        )
         self.qwenvl = Qwen3VLForConditionalGeneration._from_config(vlm_config)
+        if vlm_config.vision_config.enable_vision_position_cache:
+            logger.info_rank0(
+                "Vision position mode: metadata cache and vectorized interpolation enabled; "
+                "legacy precompute_grid_thw is not used."
+            )
+        else:
+            logger.info_rank0(
+                "Vision position mode: legacy implementation; precompute_grid_thw=%s.",
+                getattr(self.config, "precompute_grid_thw", False),
+            )
         if self.config.use_lm_head:
             self.qwenvl.tie_weights()
 
@@ -216,26 +229,36 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         pixel_values: torch.FloatTensor,
         image_grid_thw: torch.LongTensor,
     ):
-        precompute_grid_thw = getattr(self.config, "precompute_grid_thw", False)
-        if precompute_grid_thw and self.position_embeddings is None:
-            (
-                self.pos_embeds,
-                self.position_embeddings,
-                self.cu_seqlens,
-                self.visual_split_sizes,
-                self.visual_max_seqlen,
-            ) = self.qwenvl.visual.preprcess_grid_thw(grid_thw=image_grid_thw)
-        image_embeds, deepstack_image_embeds = self.qwenvl.visual(
-            pixel_values,
-            grid_thw=image_grid_thw,
-            pos_embeds=self.pos_embeds,
-            position_embeddings=self.position_embeddings,
-            cu_seqlens=self.cu_seqlens,
-            max_seqlen=self.visual_max_seqlen,
-        )
-        split_sizes = self.visual_split_sizes
-        if split_sizes is None:
-            split_sizes = (image_grid_thw.prod(-1) // self.qwenvl.visual.spatial_merge_size**2).tolist()
+        if getattr(self.config, "enable_vision_position_cache", False):
+            # One explicit grid transfer, shared by position preparation and splitting.
+            # Construct cached tensors inside visual.forward, after FSDP has restored
+            # the actual compute dtype of its learned position table.
+            image_grid_cpu = image_grid_thw.detach().cpu()
+            image_embeds, deepstack_image_embeds = self.qwenvl.visual(
+                pixel_values, grid_thw=image_grid_cpu,
+            )
+            split_sizes = (image_grid_cpu.prod(-1) // self.qwenvl.visual.spatial_merge_size**2).tolist()
+        else:
+            precompute_grid_thw = getattr(self.config, "precompute_grid_thw", False)
+            if precompute_grid_thw and self.position_embeddings is None:
+                (
+                    self.pos_embeds,
+                    self.position_embeddings,
+                    self.cu_seqlens,
+                    self.visual_split_sizes,
+                    self.visual_max_seqlen,
+                ) = self.qwenvl.visual.preprcess_grid_thw(grid_thw=image_grid_thw)
+            image_embeds, deepstack_image_embeds = self.qwenvl.visual(
+                pixel_values,
+                grid_thw=image_grid_thw,
+                pos_embeds=self.pos_embeds,
+                position_embeddings=self.position_embeddings,
+                cu_seqlens=self.cu_seqlens,
+                max_seqlen=self.visual_max_seqlen,
+            )
+            split_sizes = self.visual_split_sizes
+            if split_sizes is None:
+                split_sizes = (image_grid_thw.prod(-1) // self.qwenvl.visual.spatial_merge_size**2).tolist()
         image_chunks = list(torch.split(image_embeds, split_sizes))
         deepstack_chunks = [
             list(torch.split(deepstack_embeds, split_sizes))
@@ -450,6 +473,7 @@ class FlowMatchingV2(FlowMatchingV1):
             "adanorm_time",
             "final_norm_adanorm",
             "precompute_grid_thw",
+            "enable_vision_position_cache",
             "vit_attn_implementation",
             "use_moe",
             "bias_update_speed",
