@@ -289,6 +289,13 @@ class MyTrainingArguments(TrainingArguments):
                           "kernel forward and 3 backward instead of 8 and 15 eager kernels. Qwen3-VL VLMs only. "
                           "Measured with enable_gradient_checkpointing true, where the decoder layers run eagerly."},
     )
+    enable_fused_qkv_prep: bool = field(
+        default=False,
+        metadata={"help": "Prepare the joint VLM / action-expert attention inputs with one Triton kernel per q/k/v "
+                          "tensor (cast + concat + RoPE + transpose to the flex layout, forward and backward) and run "
+                          "flex attention without padding to the block size. LingbotVLAV2Config (Qwen3-VL) only; "
+                          "needs attention_implementation flex_cached."},
+    )
 
 @dataclass
 class MyDataArguments(DataArguments):
@@ -390,6 +397,17 @@ def main():
         from lingbotvla.models.vla.lingbot_vla.qwen3vl_in_vla import compiled_rmsnorm_enabled
         if not compiled_rmsnorm_enabled():
             raise ValueError("enable_compiled_rmsnorm applies to a Qwen3-VL VLM (Qwen3VLTextRMSNorm) only")
+    if args.train.enable_fused_qkv_prep:
+        # What QwenvlWithExpertV2Model.forward reads: a switch that does not arrive there (undeclared config field,
+        # attention_implementation other than flex_cached) would silently run the unfused path.
+        qcfg = model.model.qwenvl_with_expert.config
+        if not (getattr(qcfg, "enable_fused_qkv_prep", False) and qcfg.attention_implementation == "flex_cached"):
+            raise ValueError(
+                "enable_fused_qkv_prep would not take effect (it needs LingbotVLAV2Config and "
+                "attention_implementation 'flex_cached'): the model config has "
+                f"enable_fused_qkv_prep={getattr(qcfg, 'enable_fused_qkv_prep', None)}, "
+                f"attention_implementation={qcfg.attention_implementation!r}"
+            )
     use_depth_align = True if args.train.align_params != {} else False
     use_future_depth = args.train.align_params.get('depth', {}).get('use_future_depth', False)
     use_future_video = use_depth_align and args.train.align_params.get('use_future_video', False)

@@ -331,10 +331,32 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
             f"(got action={action_num_layers}, vlm={num_layers})."
         )
 
+        # --train.enable_fused_qkv_prep: per layer one Triton kernel per q/k/v tensor (cast + concat + RoPE + transpose
+        # to the flex layout, no pad) instead of .float() + cat + apply_mrope + pad (lingbotvla/ops/joint_qkv_prep.py)
+        use_fused = (
+            getattr(self.config, "enable_fused_qkv_prep", False)
+            and self.config.attention_implementation == "flex_cached"
+            and not use_cache
+            and len(inputs_embeds) == 2
+            and inputs_embeds[0] is not None
+            and inputs_embeds[1] is not None
+        )
+        if use_fused:
+            from lingbotvla.ops.joint_qkv_prep import joint_qkv_prep
+
+            from .flex_attention import flex_attention_prepared
+
+            # cos/sin depend only on position_ids: computed once per forward instead of in every layer's apply_mrope
+            # (rotary_emb takes only the dtype and device from its first argument)
+            rope_cos, rope_sin = self.qwenvl.model.language_model.rotary_emb(
+                torch.empty(0, dtype=torch.float32, device=position_ids.device), position_ids
+            )
+
         for layer_idx in range(num_layers):
             query_states = []
             key_states = []
             value_states = []
+            qkv_raw = []
             for i, hidden_states in enumerate(inputs_embeds):
                 if hidden_states is None:
                     continue
@@ -344,36 +366,56 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
                     )
                 else:
                     q, k, v = models[i].layers[layer_idx](hidden_states, compute_kqv=True)
+                if use_fused:
+                    qkv_raw.append((q, k, v))  # no .float(): joint_qkv_prep reads each stream in its own dtype
+                    continue
                 query_states.append(q.float())
                 key_states.append(k.float())
                 value_states.append(v.float())
 
-            query_states = torch.cat(query_states, dim=1)
-            key_states = torch.cat(key_states, dim=1)
-            value_states = torch.cat(value_states, dim=1)
-            query_states, key_states = self.apply_mrope(query_states, key_states, position_ids)
-            key_states, value_states, past_key_values = self.handle_kv_cache(
-                key_states,
-                value_states,
-                layer_idx,
-                past_key_values=past_key_values,
-                use_cache=use_cache,
-                fill_kv_cache=fill_kv_cache,
-            )
-            if self.config.attention_implementation == "flex_cached":
+            if use_fused:
+                (q_v, k_v, v_v), (q_e, k_e, v_e) = qkv_raw
+                # fp32 [B, Hq|Hkv, L, D], L = Lv + Le not padded to the flex block size
+                query_states, key_states, value_states = joint_qkv_prep(
+                    q_v, k_v, v_v, q_e, k_e, v_e, rope_cos, rope_sin
+                )
                 if layer_idx == 0:
-                    _full_len = query_states.shape[1]
+                    _full_len = query_states.shape[2]
                     _full_block_mask = build_block_mask(
                         attention_mask,
                         self.qwenvl.config.text_config.num_attention_heads,
                         _full_len,
                         _full_len,
+                        pad_to_block=False,
                     )
-                att_output = flex_attention_with_block_mask(
-                    query_states, key_states, value_states, _full_block_mask, query_states.shape[1]
-                )
+                att_output = flex_attention_prepared(query_states, key_states, value_states, _full_block_mask)
             else:
-                att_output = self.attention_interface(query_states, key_states, value_states, attention_mask)
+                query_states = torch.cat(query_states, dim=1)
+                key_states = torch.cat(key_states, dim=1)
+                value_states = torch.cat(value_states, dim=1)
+                query_states, key_states = self.apply_mrope(query_states, key_states, position_ids)
+                key_states, value_states, past_key_values = self.handle_kv_cache(
+                    key_states,
+                    value_states,
+                    layer_idx,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                    fill_kv_cache=fill_kv_cache,
+                )
+                if self.config.attention_implementation == "flex_cached":
+                    if layer_idx == 0:
+                        _full_len = query_states.shape[1]
+                        _full_block_mask = build_block_mask(
+                            attention_mask,
+                            self.qwenvl.config.text_config.num_attention_heads,
+                            _full_len,
+                            _full_len,
+                        )
+                    att_output = flex_attention_with_block_mask(
+                        query_states, key_states, value_states, _full_block_mask, query_states.shape[1]
+                    )
+                else:
+                    att_output = self.attention_interface(query_states, key_states, value_states, attention_mask)
 
             outputs_embeds = []
             start = 0
@@ -450,6 +492,7 @@ class FlowMatchingV2(FlowMatchingV1):
             "adanorm_time",
             "final_norm_adanorm",
             "precompute_grid_thw",
+            "enable_fused_qkv_prep",
             "vit_attn_implementation",
             "use_moe",
             "bias_update_speed",
