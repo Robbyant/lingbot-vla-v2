@@ -307,6 +307,13 @@ class MyTrainingArguments(TrainingArguments):
                           "alignment, or precomputed teacher targets). 'teacher' = at the start of every micro-batch, "
                           "so its all-gathers overlap the online teacher models."},
     )
+    fsdp_rs_inflight_depth: int = field(
+        default=1,
+        metadata={"help": "Max number of FSDP2 reduce-scatters in flight in backward (1 = FSDP2 default: the compute "
+                          "stream waits for the previous reduce-scatter before issuing the next). Values > 1 need "
+                          "PyTorch 2.8, data_parallel_mode=fsdp2 without HSDP, vlm_fsdp=true, module_fsdp_enable=true "
+                          "and enable_full_shard=false."},
+    )
 
 @dataclass
 class MyDataArguments(DataArguments):
@@ -518,18 +525,22 @@ def main():
         logger.warning_rank0("fsdp_prologue_under=teacher but no teacher model runs before the forward (no depth "
                              "alignment): the prologue's layer all-gathers queue ahead of those of the units the "
                              "forward needs first (the root); use fsdp_prologue_under=vit")
-    if args.train.fsdp_forward_prefetch_depth < 0:
-        raise ValueError(f"need fsdp_forward_prefetch_depth >= 0, got {args.train.fsdp_forward_prefetch_depth}")
-    if args.train.enable_full_shard and (args.train.fsdp_no_reshard_after_backward
-                                         or args.train.fsdp_forward_prefetch_depth > 0):
+    if args.train.fsdp_forward_prefetch_depth < 0 or args.train.fsdp_rs_inflight_depth < 1:
+        raise ValueError(f"need fsdp_forward_prefetch_depth >= 0 and fsdp_rs_inflight_depth >= 1, got "
+                         f"{args.train.fsdp_forward_prefetch_depth} and {args.train.fsdp_rs_inflight_depth}")
+    layer_comm_on = (args.train.fsdp_no_reshard_after_backward or args.train.fsdp_forward_prefetch_depth > 0
+                     or args.train.fsdp_rs_inflight_depth > 1)
+    if args.train.enable_full_shard and layer_comm_on:
         # With reshard_after_forward, keeping the parameters through backward would hold every layer unsharded from its
         # first backward all-gather until after the backward (~13 GiB per rank for the 36-layer Qwen3-VL-4B configs).
-        # Prefetch was also measured with full shard: no speedup and more reserved memory.
-        raise ValueError("fsdp_no_reshard_after_backward / fsdp_forward_prefetch_depth require enable_full_shard=false")
-    if args.train.fsdp_no_reshard_after_backward or args.train.fsdp_forward_prefetch_depth > 0:
+        # Prefetch and reduce-scatters in flight were also measured with full shard: no speedup, more reserved memory,
+        # and with both on the VLM gradients varied from run to run.
+        raise ValueError("fsdp_no_reshard_after_backward / fsdp_forward_prefetch_depth / fsdp_rs_inflight_depth "
+                         "require enable_full_shard=false")
+    if layer_comm_on:
         if args.train.data_parallel_mode != "fsdp2":
-            raise ValueError("layer comm scheduling (fsdp_no_reshard_after_backward / fsdp_forward_prefetch_depth) "
-                             "is FSDP2-only")
+            raise ValueError("layer comm scheduling (fsdp_no_reshard_after_backward / fsdp_forward_prefetch_depth / "
+                             "fsdp_rs_inflight_depth) is FSDP2-only")
         if not (args.train.vlm_fsdp and args.train.module_fsdp_enable):
             raise ValueError("layer comm scheduling needs the decoder layers as FSDP2 units: set vlm_fsdp=true and "
                              "module_fsdp_enable=true")
@@ -570,12 +581,18 @@ def main():
             prefetch_depth=args.train.fsdp_forward_prefetch_depth,
             no_reshard_after_backward=args.train.fsdp_no_reshard_after_backward,
             prefix_units=prefix_units,
+            rs_inflight_depth=args.train.fsdp_rs_inflight_depth,
         )
-        layer_comm.configure()
+        # the reduce-scatter wrapper patches FSDP2 class-wide: every FSDP2 unit of the model is checked before it is
+        # installed
+        layer_comm.configure(all_groups=[m._get_fsdp_state()._fsdp_param_group for m in model.modules()
+                                         if isinstance(m, FSDPModule) and m._get_fsdp_state()._fsdp_param_group is not None])
         logger.info_rank0(f"LayerCommScheduler: depth={layer_comm.depth}, "
                           f"no_reshard_after_backward={layer_comm.no_reshard}, {layer_comm.n} layers"
                           f"{f', prologue under {args.train.fsdp_prologue_under}' if layer_comm.depth > 0 else ''}"
-                          f"{f' after {len(layer_comm.prefix)} prefix units' if layer_comm.prefix else ''}")
+                          f"{f' after {len(layer_comm.prefix)} prefix units' if layer_comm.prefix else ''}, "
+                          f"reduce-scatters in flight {layer_comm.rs_inflight_depth}"
+                          f"{' (post_backward wrapper installed)' if layer_comm.rs_inflight is not None else ''}")
     logger.info_rank0(model)
     if args.train.use_compile:
         model = torch.compile(model)
@@ -922,6 +939,11 @@ def main():
                 with model_bwd_context:
                     loss.backward()
                 if layer_comm is not None:
+                    if layer_comm.rs_inflight is not None:
+                        if global_step <= 3 and args.train.global_rank == 0:
+                            logger.info(f"rs_inflight: max pending {layer_comm.rs_inflight.max_pending}, "
+                                        f"depth {layer_comm.rs_inflight.depth}")
+                        layer_comm.rs_inflight.max_pending = 0
                     if layer_comm.no_reshard and global_step <= 3 and args.train.global_rank == 0:
                         _alloc_before = torch.cuda.memory_allocated()
                     layer_comm.after_backward()
