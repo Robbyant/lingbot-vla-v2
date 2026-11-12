@@ -403,6 +403,8 @@ If you also set `global_batch_size` explicitly, it must be consistent with the c
 | `attention_implementation` | str | `"flex"` | VLA attention implementation. Supported values include `"flex"`, `"flex_cached"`, and `"eager"`. |
 | `use_compile` | bool | `false` | Enable `torch.compile` for training acceleration. |
 | `fsdp_no_reshard_after_backward` | bool | `false` | Keep each decoder layer's gathered parameters through the whole backward pass instead of all-gathering them again before the backward of each joint layer's q/k/v call; reshard after backward. Needs `data_parallel_mode: fsdp2`, `vlm_fsdp: true`, `module_fsdp_enable: true` and `enable_full_shard: false`. |
+| `fsdp_forward_prefetch_depth` | int | `0` | From step 2 on, all-gather the first k joint layers before each forward and keep a lookahead of k layers in the layer loop (0 = FSDP2 default). Needs `data_parallel_mode: fsdp2`, `vlm_fsdp: true`, `module_fsdp_enable: true` and `enable_full_shard: false`. |
+| `fsdp_prologue_under` | str | `"vit"` | Where the prefetch prologue runs when `fsdp_forward_prefetch_depth` > 0: `"vit"` (right before the model forward, overlapping the ViT; suited to runs without online teacher models, e.g. without depth / video alignment or with precomputed teacher targets) or `"teacher"` (overlapping the online teacher models). |
 | `ckpt_manager` | str | `"dcp"` | Checkpoint backend. Options: `"dcp"` (PyTorch Distributed Checkpoint), `"bytecheckpoint"`. |
 | `enable_fp32` | bool | `false` | Use float32 precision for the action expert. |
 | `enable_resume` | bool | `false` | Automatically resume training from the latest checkpoint in `output_dir`. |

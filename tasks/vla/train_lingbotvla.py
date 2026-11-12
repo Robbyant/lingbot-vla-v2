@@ -290,6 +290,23 @@ class MyTrainingArguments(TrainingArguments):
                           "backward. Needs data_parallel_mode=fsdp2, vlm_fsdp=true, module_fsdp_enable=true and "
                           "enable_full_shard=false."},
     )
+    fsdp_forward_prefetch_depth: int = field(
+        default=0,
+        metadata={"help": "From global step 2 on, all-gather the first k joint layers before the forward of every "
+                          "micro-batch (see fsdp_prologue_under) and keep a lookahead of k layers in the layer loop. "
+                          "0 = FSDP2 default. Needs data_parallel_mode=fsdp2, vlm_fsdp=true, module_fsdp_enable=true "
+                          "and enable_full_shard=false."},
+    )
+    fsdp_prologue_under: Literal["vit", "teacher"] = field(
+        default="vit",
+        metadata={"help": "Where the fsdp_forward_prefetch_depth prologue runs (only used when that depth is > 0): "
+                          "'vit' (default) = right before the model forward, after all-gathering the units the forward "
+                          "calls before the layers (the root and, when they are separate FSDP units, the ViT, "
+                          "embed_tokens and task projections), so the layers' all-gathers overlap the ViT / prefix "
+                          "compute; suited to runs in which no teacher model runs before the forward (no depth / video "
+                          "alignment, or precomputed teacher targets). 'teacher' = at the start of every micro-batch, "
+                          "so its all-gathers overlap the online teacher models."},
+    )
 
 @dataclass
 class MyDataArguments(DataArguments):
@@ -497,16 +514,27 @@ def main():
         use_future_image=args.data.use_future_image,
     )
     layer_comm = None
-    if args.train.fsdp_no_reshard_after_backward:
-        if args.train.enable_full_shard:
-            # With reshard_after_forward, keeping the parameters through backward would hold every layer unsharded from its
-            # first backward all-gather until after the backward (~13 GiB per rank for the 36-layer Qwen3-VL-4B configs).
-            raise ValueError("fsdp_no_reshard_after_backward requires enable_full_shard=false")
+    if args.train.fsdp_forward_prefetch_depth > 0 and args.train.fsdp_prologue_under == "teacher" and not use_depth_align:
+        logger.warning_rank0("fsdp_prologue_under=teacher but no teacher model runs before the forward (no depth "
+                             "alignment): the prologue's layer all-gathers queue ahead of those of the units the "
+                             "forward needs first (the root); use fsdp_prologue_under=vit")
+    if args.train.fsdp_forward_prefetch_depth < 0:
+        raise ValueError(f"need fsdp_forward_prefetch_depth >= 0, got {args.train.fsdp_forward_prefetch_depth}")
+    if args.train.enable_full_shard and (args.train.fsdp_no_reshard_after_backward
+                                         or args.train.fsdp_forward_prefetch_depth > 0):
+        # With reshard_after_forward, keeping the parameters through backward would hold every layer unsharded from its
+        # first backward all-gather until after the backward (~13 GiB per rank for the 36-layer Qwen3-VL-4B configs).
+        # Prefetch was also measured with full shard: no speedup and more reserved memory.
+        raise ValueError("fsdp_no_reshard_after_backward / fsdp_forward_prefetch_depth require enable_full_shard=false")
+    if args.train.fsdp_no_reshard_after_backward or args.train.fsdp_forward_prefetch_depth > 0:
         if args.train.data_parallel_mode != "fsdp2":
-            raise ValueError("fsdp_no_reshard_after_backward is FSDP2-only")
+            raise ValueError("layer comm scheduling (fsdp_no_reshard_after_backward / fsdp_forward_prefetch_depth) "
+                             "is FSDP2-only")
         if not (args.train.vlm_fsdp and args.train.module_fsdp_enable):
             raise ValueError("layer comm scheduling needs the decoder layers as FSDP2 units: set vlm_fsdp=true and "
                              "module_fsdp_enable=true")
+        from torch.distributed.fsdp import FSDPModule
+
         from lingbotvla.distributed.fsdp_layer_comm import LayerCommScheduler
         from lingbotvla.distributed.torch_parallelize import _resolve
         core = model.model.qwenvl_with_expert
@@ -515,13 +543,39 @@ def main():
                                                ("language_model", "model", "layers")])
         if llm_layers is None:
             raise RuntimeError("layer comm scheduling: could not locate the Qwen-VL decoder layers")
+        prefix_units = None
+        if args.train.fsdp_forward_prefetch_depth > 0 and args.train.fsdp_prologue_under == "vit":
+            # Candidate units the forward all-gathers before the layer loop, in call order (embed_prefix): the root,
+            # the vision tower (its parent, patch_embed, the blocks with the deepstack mergers after their blocks, the
+            # merger), embed_tokens and the two shared task projections. A module that is not an FSDP unit belongs to an
+            # enclosing unit and is skipped: with the default build_parallelize_model layout only the root remains.
+            visual, _ = _resolve(core.qwenvl, [("model", "visual"), ("visual",)])
+            embed_tokens, _ = _resolve(core.qwenvl, [("model", "language_model", "embed_tokens"),
+                                                     ("model", "embed_tokens"), ("language_model", "model", "embed_tokens")])
+            if visual is None or embed_tokens is None:
+                raise RuntimeError("fsdp_prologue_under=vit: could not locate the Qwen-VL vision tower / token embedding")
+            deepstack_at = list(getattr(visual, "deepstack_visual_indexes", []))
+            candidates = [model, visual, getattr(visual, "patch_embed", None)]
+            for j, block in enumerate(visual.blocks):
+                candidates.append(block)
+                if j in deepstack_at:
+                    candidates.append(visual.deepstack_merger_list[deepstack_at.index(j)])
+            candidates += [getattr(visual, "merger", None), embed_tokens,
+                           getattr(model.model, "current_shared_task_proj", None),
+                           getattr(model.model, "future_shared_task_proj", None)]
+            prefix_units = [m for m in candidates if isinstance(m, FSDPModule)]
         layer_comm = LayerCommScheduler(
             list(llm_layers),
             list(core.qwen_expert.model.layers),
+            prefetch_depth=args.train.fsdp_forward_prefetch_depth,
             no_reshard_after_backward=args.train.fsdp_no_reshard_after_backward,
+            prefix_units=prefix_units,
         )
         layer_comm.configure()
-        logger.info_rank0(f"LayerCommScheduler: no_reshard_after_backward={layer_comm.no_reshard}, {layer_comm.n} layers")
+        logger.info_rank0(f"LayerCommScheduler: depth={layer_comm.depth}, "
+                          f"no_reshard_after_backward={layer_comm.no_reshard}, {layer_comm.n} layers"
+                          f"{f', prologue under {args.train.fsdp_prologue_under}' if layer_comm.depth > 0 else ''}"
+                          f"{f' after {len(layer_comm.prefix)} prefix units' if layer_comm.prefix else ''}")
     logger.info_rank0(model)
     if args.train.use_compile:
         model = torch.compile(model)
@@ -792,6 +846,8 @@ def main():
                     k: v.cuda(non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in micro_batch.items()
                 }
                 future_video_effective_fps = micro_batch.pop('future_video_effective_fps', None)
+                if layer_comm is not None and global_step > 1 and args.train.fsdp_prologue_under == "teacher":
+                    layer_comm.prologue()  # its all-gathers run under the online teacher models
                 depth_forward_time = 0
                 if use_depth_align:
                     with torch.no_grad():
@@ -823,6 +879,8 @@ def main():
                             future_video_target_rgb = future_pil_images
                         depth_forward_time = time.time() - depth_start_time
 
+                if layer_comm is not None and global_step > 1 and args.train.fsdp_prologue_under == "vit":
+                    layer_comm.prologue()  # its all-gathers run under the ViT / prefix compute
                 with model_fwd_context:
                     model_outputs = model(
                         **micro_batch,

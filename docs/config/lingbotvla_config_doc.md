@@ -125,6 +125,8 @@ robot configs, and normalization statistics, see
 | `train.vlm_fsdp` | bool | `False` | Whether to apply FSDP2 to the VLM. |
 | `train.use_compile` | bool | `False` | Whether to enable `torch.compile`. |
 | `train.fsdp_no_reshard_after_backward` | bool | `False` | Keep each decoder layer's gathered parameters through the whole backward pass instead of all-gathering them again before the backward of each joint layer's q/k/v call; reshard after backward. Needs `train.data_parallel_mode: fsdp2`, `train.vlm_fsdp: true`, `train.module_fsdp_enable: true` and `train.enable_full_shard: false`. |
+| `train.fsdp_forward_prefetch_depth` | int | `0` | From step 2 on, all-gather the first k joint layers before each forward and keep a lookahead of k layers in the layer loop (0 = FSDP2 default). Needs `train.data_parallel_mode: fsdp2`, `train.vlm_fsdp: true`, `train.module_fsdp_enable: true` and `train.enable_full_shard: false`. |
+| `train.fsdp_prologue_under` | str | `"vit"` | Where the prefetch prologue runs when `train.fsdp_forward_prefetch_depth` > 0: `"vit"` (right before the model forward, overlapping the ViT; suited to runs without online teacher models, e.g. without depth / video alignment or with precomputed teacher targets) or `"teacher"` (overlapping the online teacher models). |
 | `train.enable_reentrant` | bool | `False` | Use reentrant gradient checkpointing. |
 | `train.allow_partial_checkpoint` | bool | `False` | Allow partial checkpoint loading and skip missing keys when model structure differs. |
 | `train.enable_forward_prefetch` | bool | `True` | Enable forward prefetch for FSDP1. |
