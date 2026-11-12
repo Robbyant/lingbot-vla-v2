@@ -109,6 +109,8 @@ class MultiVLADataset(Dataset):
             dataset_start_index.append(start_index)
             start_index += dataset.dataset.num_frames
         self.dataset_start_index = dataset_start_index
+        # Set by the teacher cache so that each sample reports which index it was loaded from.
+        self.return_sample_index = False
 
 
     @property
@@ -140,6 +142,8 @@ class MultiVLADataset(Dataset):
             item[0]['rep_id'] = dataset.data_name
         else:
             item['rep_id'] = dataset.data_name
+            if self.return_sample_index:
+                item['sample_index'] = idx
         
         return item
 

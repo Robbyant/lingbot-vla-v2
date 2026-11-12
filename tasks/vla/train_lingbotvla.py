@@ -46,6 +46,7 @@ from lingbotvla.models.vla.vision_models.module_utils import (
     log_video,
 )
 from lingbotvla.models.vla.lingbot_vla.moe_load_balance import build_moe_load_balance_hook
+from lingbotvla.data.vla_data import teacher_cache
 import gc
 gc.set_threshold(50000, 50, 50)
 
@@ -169,6 +170,20 @@ class MyTrainingArguments(TrainingArguments):
     align_params: Optional[Dict[str, Any]] = field(
         default_factory=dict,
         metadata={"help": "The config of vaco"},
+    )
+    teacher_cache_dir: Optional[str] = field(
+        default=None,
+        metadata={"help": "Directory of precomputed teacher targets. Unset: run the teachers every step."},
+    )
+    teacher_cache_mode: Literal["read", "build", "verify"] = field(
+        default="read",
+        metadata={
+            "help": "With teacher_cache_dir: `build` writes the cache and exits; `read` trains from it "
+            "without loading the teachers; `verify` also runs the teachers, logs how far the cached "
+            "targets are from them, and trains on the cached targets. Loading the teachers draws from "
+            "the random generators, so only `verify` keeps the flow-matching noise of a run without "
+            "the cache and isolates the effect of the cached targets on the loss."
+        },
     )
     attention_implementation: str = field(
         default="flex",
@@ -330,6 +345,23 @@ class Arguments:
     eval: "EvalArguments" = field(default_factory=EvalArguments)
 
 
+def log_teacher_cache_diff(micro_batch, online, step):
+    """Pop the cached teacher targets from micro_batch, log their largest difference from the
+    targets the teachers just computed and the fraction of elements that match exactly, and
+    return the cached targets."""
+    parts, out = [], teacher_cache.pop_batch_targets(micro_batch)
+    for key, ref in online.items():
+        cached = out[key] = out[key].to(ref.dtype)
+        if cached.stride() != ref.stride():
+            raise ValueError(f"teacher cache {key} layout {cached.stride()} differs from online {ref.stride()}")
+        diff = (cached.float() - ref.float()).abs()
+        stats = torch.stack([diff.max(), -(cached == ref).float().mean(), ref.float().abs().max()])
+        dist.all_reduce(stats, op=dist.ReduceOp.MAX)
+        parts.append(f"{key} max|diff| {stats[0]:.3e} exact {-stats[1]:.6f} max|ref| {stats[2]:.3e}")
+    logger.info_rank0(f"TeacherCacheVerify step {step}: " + "; ".join(parts))
+    return out
+
+
 def main():
     args = parse_args(Arguments)
     logger.info(f"Process rank: {args.train.global_rank}, world size: {args.train.world_size}")
@@ -387,6 +419,18 @@ def main():
     future_video_loss_weight = 1.0
     depth_loss_weight = 1.0
     future_depth_loss_weight = 1.0
+    if not args.train.teacher_cache_dir and args.train.teacher_cache_mode != "read":
+        raise ValueError("teacher_cache_mode=build/verify requires teacher_cache_dir")
+    teacher_cache_mode = args.train.teacher_cache_mode if args.train.teacher_cache_dir else None
+    if teacher_cache_mode is not None:
+        video_align = args.train.align_params.get("video", {})
+        if not (use_depth_align and use_future_depth and use_future_video and args.data.data_name == "multi"):
+            raise ValueError("teacher_cache_dir supports depth + future depth + future video alignment on a multi dataset.")
+        if video_align.get("use_cls_loss", False) or not video_align.get("use_current_patch_loss", False):
+            raise ValueError("teacher_cache_dir caches the current and future DINO patch targets only.")
+        if getattr(args.data, "image_augment", False):
+            raise ValueError("teacher_cache_dir needs deterministic teacher inputs; image_augment must be off.")
+    moge_model = morgbd_model = None
     if use_future_video:
         if not args.data.use_future_image:
             raise ValueError("align_params.use_future_video=True requires data.use_future_image=True.")
@@ -404,15 +448,16 @@ def main():
             raise ValueError(f"Only MoRGBD depth distillation is supported, got {depth_model_type!r}.")
         depth_loss_weight = args.train.align_params.get("depth_loss_weight", 1.0)
         future_depth_loss_weight = args.train.align_params.get("future_depth_loss_weight", 1.0)
-        print('====Loading Depth Model====')
-        moge_model, morgbd_model = build_depth_model(args.train.align_params)
-        if args.train.use_compile:
-            moge_model = torch.compile(moge_model)
-            morgbd_model = torch.compile(morgbd_model)
+        if teacher_cache_mode != "read":
+            print('====Loading Depth Model====')
+            moge_model, morgbd_model = build_depth_model(args.train.align_params)
+            if args.train.use_compile:
+                moge_model = torch.compile(moge_model)
+                morgbd_model = torch.compile(morgbd_model)
         if 'visual_dir' not in args.train.align_params or not args.train.align_params['visual_dir']:
             args.train.align_params['visual_dir'] = os.path.join(args.train.output_dir, 'images')
         os.makedirs(args.train.align_params['visual_dir'], exist_ok=True)
-        if use_future_video:
+        if use_future_video and teacher_cache_mode != "read":
             print('====Loading Future Video Model====')
             video_teacher = build_video_model(args.train.align_params['video'])
     from lingbotvla.utils.moe_utils import log_model_param_stats
@@ -441,6 +486,51 @@ def main():
             args.data.chunk_size = args.train.chunk_size
             train_dataset = build_vla_dataset(dataset_config=args.data, model_config=args.model, config=model.config, processor=processor, use_depth_align=use_depth_align)
             args.train.compute_train_steps(args.data.max_seq_len, args.data.train_size, len(train_dataset))
+            if teacher_cache_mode is not None:
+                cache_meta = teacher_cache.fingerprint(
+                    train_dataset,
+                    args.train.align_params,
+                    getattr(args.data, "image_augment", False),
+                    args.data.cameras,
+                )
+                if teacher_cache_mode == "build":
+                    del model
+                    helper.empty_cache()
+
+                    def compute_teacher_targets(batch):
+                        # Same calls as the training loop below.
+                        with torch.no_grad():
+                            with torch.autocast("cuda", dtype=torch.bfloat16):
+                                depth, _ = get_depth_target(depth_model_type, (moge_model, morgbd_model), batch["pil_images"])
+                                video = get_video_target(
+                                    video_teacher,
+                                    batch["pil_images"],
+                                    batch["future_pil_images"],
+                                    args.train.align_params["video"],
+                                    effective_fps=batch.get("future_video_effective_fps"),
+                                )
+                        return {"depth": depth, "video_current": video["current_patch"], "video_future": video["patch"]}
+
+                    teacher_cache.build_teacher_cache(
+                        train_dataset,
+                        compute_teacher_targets,
+                        args.train.teacher_cache_dir,
+                        cache_meta,
+                        rank=args.train.global_rank,
+                        world_size=args.train.world_size,
+                        batch_size=args.train.micro_batch_size,
+                        num_workers=args.data.num_workers,
+                        collate_fn=VLADataCollatorWithPacking(),
+                        barrier=dist.barrier,
+                    )
+                    dist.destroy_process_group()
+                    return
+                train_dataset = teacher_cache.TeacherCacheDataset(
+                    train_dataset,
+                    teacher_cache.TeacherCache(args.train.teacher_cache_dir, cache_meta,
+                                               batch_size=args.train.micro_batch_size),
+                    keep_teacher_images=teacher_cache_mode == "verify",
+                )
         
         train_dataloader = build_dataloader(
             dataset=train_dataset,
@@ -728,6 +818,7 @@ def main():
         for epoch_step in range(start_step, args.train.train_steps):
             current_epoch_step_for_eval = epoch_step + 1
             global_step += 1
+            data_wait_start = time.time()
             try:
                 micro_batches: List[Dict[str, Any]] = next(data_iterator)
             except StopIteration:
@@ -746,6 +837,7 @@ def main():
             future_video_current_dino = None
             future_video_current_rgb, future_video_target_rgb = None, None
             ignore_batch_num = 0
+            data_wait_time = time.time() - data_wait_start
             torch.cuda.synchronize()
             start_time = time.time()
             for micro_batch in micro_batches:
@@ -760,7 +852,15 @@ def main():
                 }
                 future_video_effective_fps = micro_batch.pop('future_video_effective_fps', None)
                 depth_forward_time = 0
-                if use_depth_align:
+                if use_depth_align and teacher_cache_mode == "read":
+                    depth_start_time = time.time()
+                    cached = teacher_cache.pop_batch_targets(micro_batch)
+                    depth_targets = cached["teacher_depth"]
+                    future_depth_targets = cached["teacher_future_depth"]
+                    future_video_targets = cached["teacher_video_future"]
+                    future_video_current_dino = cached["teacher_video_current"]
+                    depth_forward_time = time.time() - depth_start_time
+                elif use_depth_align:
                     with torch.no_grad():
                         depth_start_time = time.time()
                         pil_images = micro_batch.pop('pil_images', None)
@@ -789,6 +889,21 @@ def main():
                             future_video_current_rgb = pil_images
                             future_video_target_rgb = future_pil_images
                         depth_forward_time = time.time() - depth_start_time
+                    if teacher_cache_mode == "verify":
+                        cached = log_teacher_cache_diff(
+                            micro_batch,
+                            {
+                                "teacher_depth": depth_targets,
+                                "teacher_future_depth": future_depth_targets,
+                                "teacher_video_future": future_video_targets,
+                                "teacher_video_current": future_video_current_dino,
+                            },
+                            global_step,
+                        )
+                        depth_targets = cached["teacher_depth"]
+                        future_depth_targets = cached["teacher_future_depth"]
+                        future_video_targets = cached["teacher_video_future"]
+                        future_video_current_dino = cached["teacher_video_current"]
 
                 with model_fwd_context:
                     model_outputs = model(
@@ -933,7 +1048,8 @@ def main():
                 f"{expert_lr_str}"
                 f"StepTime {delta_time:.3f}s, "
                 f"Depth_Forward_Time {depth_forward_time: .3f}s, "
-                f"Ignore_Batch_Num {ignore_batch_num}"
+                f"Ignore_Batch_Num {ignore_batch_num}, "
+                f"Data_Wait {data_wait_time:.3f}s"
             )
 
 
@@ -1066,7 +1182,7 @@ def main():
                 # except Exception as e:
                 #     logger.info_rank0(f"⚠️ Failed to write loss.jsonl: {e}")
 
-                if use_depth_align:
+                if use_depth_align and teacher_cache_mode != "read":
                     if global_step % args.train.align_params['visual_steps'] == 0:
                         with torch.no_grad():
                             if use_future_video:

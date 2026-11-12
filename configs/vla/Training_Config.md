@@ -402,6 +402,8 @@ If you also set `global_batch_size` explicitly, it must be consistent with the c
 | `vlm_fsdp` | bool | `false` | Apply FSDP2 to the VLM. |
 | `attention_implementation` | str | `"flex"` | VLA attention implementation. Supported values include `"flex"`, `"flex_cached"`, and `"eager"`. |
 | `use_compile` | bool | `false` | Enable `torch.compile` for training acceleration. |
+| `teacher_cache_dir` | str or null | `null` | Directory of offline frozen depth/video teacher targets. Omit to retain online teachers. Requires deterministic multi-dataset inputs; see [teacher cache](../../docs/teacher_cache.md). |
+| `teacher_cache_mode` | str | `"read"` | With `teacher_cache_dir`: `"build"` computes/resumes the cache and exits; `"read"` trains without loading teachers; `"verify"` also runs teachers, logs target differences and checks layouts. Build and read with the same micro batch size. |
 | `ckpt_manager` | str | `"dcp"` | Checkpoint backend. Options: `"dcp"` (PyTorch Distributed Checkpoint), `"bytecheckpoint"`. |
 | `enable_fp32` | bool | `false` | Use float32 precision for the action expert. |
 | `enable_resume` | bool | `false` | Automatically resume training from the latest checkpoint in `output_dir`. |
