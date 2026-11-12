@@ -75,6 +75,10 @@ Metadata compares the dataset identifiers/order/frame counts, camera order, futu
 
 A cache trades repeated GPU teacher work for preprocessing time and storage bandwidth. Our full RoboTwin clean50 cache has 549,787 frames and occupies approximately 806 GiB; cache size scales with the number and shapes of targets. Use local fast storage or validate your storage throughput with the end-to-end benchmark. Construction of a small complete-episode subset is a functional check, not a measurement of full-dataset build time.
 
+## Compatibility with FSDP communication scheduling
+
+When combined with [PR #67](https://github.com/Robbyant/lingbot-vla-v2/pull/67), use `train.fsdp_prologue_under=vit` (the default) in teacher-cache **read** mode. No online teacher computation remains to overlap the prefetch communication. Cache `build`/`read`/`verify` modes do not require that PR; the option is supplied by its FSDP communication scheduler. Combined performance is separate from this feature's standalone benchmark.
+
 ## Numerical validation
 
 `verify` logs the maximum absolute difference and minimum exact-match fraction across all ranks for all four target types. A successful exact check reports `max|diff| 0` and `exact 1` for each target. It trains on the cached values while still executing the online teachers.

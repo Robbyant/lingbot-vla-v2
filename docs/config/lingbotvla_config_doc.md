@@ -124,6 +124,8 @@ robot configs, and normalization statistics, see
 | `train.module_fsdp_enable` | bool | `True` | Enable module-level FSDP wrapping. |
 | `train.vlm_fsdp` | bool | `False` | Whether to apply FSDP2 to the VLM. |
 | `train.use_compile` | bool | `False` | Whether to enable `torch.compile`. |
+| `train.teacher_cache_dir` | str or null | `None` | Offline frozen depth/video target directory; omitted disables caching. Requires deterministic multi-dataset inputs; see [teacher cache](../teacher_cache.md). |
+| `train.teacher_cache_mode` | str | `"read"` | `"build"` computes/resumes targets and exits; `"read"` trains without teachers; `"verify"` also computes teachers, logs target differences and checks layouts. Build/verify require a cache directory. Build and read with the same micro batch size. |
 | `train.enable_reentrant` | bool | `False` | Use reentrant gradient checkpointing. |
 | `train.allow_partial_checkpoint` | bool | `False` | Allow partial checkpoint loading and skip missing keys when model structure differs. |
 | `train.enable_forward_prefetch` | bool | `True` | Enable forward prefetch for FSDP1. |
