@@ -124,6 +124,7 @@ robot configs, and normalization statistics, see
 | `train.module_fsdp_enable` | bool | `True` | Enable module-level FSDP wrapping. |
 | `train.vlm_fsdp` | bool | `False` | Whether to apply FSDP2 to the VLM. |
 | `train.use_compile` | bool | `False` | Whether to enable `torch.compile`. |
+| `train.fsdp_no_reshard_after_backward` | bool | `False` | Keep each decoder layer's gathered parameters through the whole backward pass instead of all-gathering them again before the backward of each joint layer's q/k/v call; reshard after backward. Needs `train.data_parallel_mode: fsdp2`, `train.vlm_fsdp: true`, `train.module_fsdp_enable: true` and `train.enable_full_shard: false`. |
 | `train.enable_reentrant` | bool | `False` | Use reentrant gradient checkpointing. |
 | `train.allow_partial_checkpoint` | bool | `False` | Allow partial checkpoint loading and skip missing keys when model structure differs. |
 | `train.enable_forward_prefetch` | bool | `True` | Enable forward prefetch for FSDP1. |

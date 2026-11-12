@@ -283,6 +283,13 @@ class MyTrainingArguments(TrainingArguments):
         default=False,
         metadata={"help": "Whether to apply FSDP2 for VLM."},
     )
+    fsdp_no_reshard_after_backward: bool = field(
+        default=False,
+        metadata={"help": "Keep each decoder layer's unsharded parameters through backward instead of all-gathering "
+                          "them again before the backward of each joint layer's q/k/v call, and reshard them after "
+                          "backward. Needs data_parallel_mode=fsdp2, vlm_fsdp=true, module_fsdp_enable=true and "
+                          "enable_full_shard=false."},
+    )
 
 @dataclass
 class MyDataArguments(DataArguments):
@@ -489,6 +496,32 @@ def main():
         vlm_fsdp=args.train.vlm_fsdp,
         use_future_image=args.data.use_future_image,
     )
+    layer_comm = None
+    if args.train.fsdp_no_reshard_after_backward:
+        if args.train.enable_full_shard:
+            # With reshard_after_forward, keeping the parameters through backward would hold every layer unsharded from its
+            # first backward all-gather until after the backward (~13 GiB per rank for the 36-layer Qwen3-VL-4B configs).
+            raise ValueError("fsdp_no_reshard_after_backward requires enable_full_shard=false")
+        if args.train.data_parallel_mode != "fsdp2":
+            raise ValueError("fsdp_no_reshard_after_backward is FSDP2-only")
+        if not (args.train.vlm_fsdp and args.train.module_fsdp_enable):
+            raise ValueError("layer comm scheduling needs the decoder layers as FSDP2 units: set vlm_fsdp=true and "
+                             "module_fsdp_enable=true")
+        from lingbotvla.distributed.fsdp_layer_comm import LayerCommScheduler
+        from lingbotvla.distributed.torch_parallelize import _resolve
+        core = model.model.qwenvl_with_expert
+        # the module paths build_parallelize_model shards (Qwen3-VL, Qwen2.5-VL, legacy layout)
+        llm_layers, _ = _resolve(core.qwenvl, [("model", "language_model", "layers"), ("model", "layers"),
+                                               ("language_model", "model", "layers")])
+        if llm_layers is None:
+            raise RuntimeError("layer comm scheduling: could not locate the Qwen-VL decoder layers")
+        layer_comm = LayerCommScheduler(
+            list(llm_layers),
+            list(core.qwen_expert.model.layers),
+            no_reshard_after_backward=args.train.fsdp_no_reshard_after_backward,
+        )
+        layer_comm.configure()
+        logger.info_rank0(f"LayerCommScheduler: no_reshard_after_backward={layer_comm.no_reshard}, {layer_comm.n} layers")
     logger.info_rank0(model)
     if args.train.use_compile:
         model = torch.compile(model)
@@ -830,6 +863,15 @@ def main():
 
                 with model_bwd_context:
                     loss.backward()
+                if layer_comm is not None:
+                    if layer_comm.no_reshard and global_step <= 3 and args.train.global_rank == 0:
+                        _alloc_before = torch.cuda.memory_allocated()
+                    layer_comm.after_backward()
+                    if layer_comm.no_reshard and global_step <= 3 and args.train.global_rank == 0:
+                        _alloc_after = torch.cuda.memory_allocated()
+                        logger.info(f"layer_comm after_backward, step {global_step}: memory_allocated "
+                                    f"{_alloc_before / 2**30:.3f} -> {_alloc_after / 2**30:.3f} GiB "
+                                    f"(-{(_alloc_before - _alloc_after) / 2**30:.3f} GiB)")
 
                 total_loss += loss.item()
                 total_vla_loss += vla_loss.item()

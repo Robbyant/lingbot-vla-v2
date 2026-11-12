@@ -402,6 +402,7 @@ If you also set `global_batch_size` explicitly, it must be consistent with the c
 | `vlm_fsdp` | bool | `false` | Apply FSDP2 to the VLM. |
 | `attention_implementation` | str | `"flex"` | VLA attention implementation. Supported values include `"flex"`, `"flex_cached"`, and `"eager"`. |
 | `use_compile` | bool | `false` | Enable `torch.compile` for training acceleration. |
+| `fsdp_no_reshard_after_backward` | bool | `false` | Keep each decoder layer's gathered parameters through the whole backward pass instead of all-gathering them again before the backward of each joint layer's q/k/v call; reshard after backward. Needs `data_parallel_mode: fsdp2`, `vlm_fsdp: true`, `module_fsdp_enable: true` and `enable_full_shard: false`. |
 | `ckpt_manager` | str | `"dcp"` | Checkpoint backend. Options: `"dcp"` (PyTorch Distributed Checkpoint), `"bytecheckpoint"`. |
 | `enable_fp32` | bool | `false` | Use float32 precision for the action expert. |
 | `enable_resume` | bool | `false` | Automatically resume training from the latest checkpoint in `output_dir`. |
