@@ -301,6 +301,12 @@ class MyTrainingArguments(TrainingArguments):
         metadata={"help": "Compute silu(gate) * up of every Qwen3VLTextMLP with one Triton kernel forward and one "
                           "backward, bit-exact with the eager F.silu(gate) * up. Qwen3-VL VLMs only."},
     )
+    enable_fused_attn_split: bool = field(
+        default=False,
+        metadata={"help": "Split the joint VLM / action-expert flex-attention output into the two streams' parts "
+                          "with one Triton kernel forward and one backward, bit-exact with the eager transpose, "
+                          "cast and slice. Needs enable_fused_qkv_prep."},
+    )
 
 @dataclass
 class MyDataArguments(DataArguments):
@@ -402,15 +408,23 @@ def main():
         from lingbotvla.models.vla.lingbot_vla.qwen3vl_in_vla import compiled_rmsnorm_enabled
         if not compiled_rmsnorm_enabled():
             raise ValueError("enable_compiled_rmsnorm applies to a Qwen3-VL VLM (Qwen3VLTextRMSNorm) only")
+    if args.train.enable_fused_attn_split and not args.train.enable_fused_qkv_prep:
+        raise ValueError("enable_fused_attn_split requires enable_fused_qkv_prep (it splits the unpadded flex output "
+                         "of that path)")
     if args.train.enable_fused_qkv_prep:
         # What QwenvlWithExpertV2Model.forward reads: a switch that does not arrive there (undeclared config field,
         # attention_implementation other than flex_cached) would silently run the unfused path.
         qcfg = model.model.qwenvl_with_expert.config
-        if not (getattr(qcfg, "enable_fused_qkv_prep", False) and qcfg.attention_implementation == "flex_cached"):
+        if not (
+            getattr(qcfg, "enable_fused_qkv_prep", False)
+            and qcfg.attention_implementation == "flex_cached"
+            and getattr(qcfg, "enable_fused_attn_split", False) == args.train.enable_fused_attn_split
+        ):
             raise ValueError(
-                "enable_fused_qkv_prep would not take effect (it needs LingbotVLAV2Config and "
-                "attention_implementation 'flex_cached'): the model config has "
+                "enable_fused_qkv_prep / enable_fused_attn_split would not take effect (they need "
+                "LingbotVLAV2Config and attention_implementation 'flex_cached'): the model config has "
                 f"enable_fused_qkv_prep={getattr(qcfg, 'enable_fused_qkv_prep', None)}, "
+                f"enable_fused_attn_split={getattr(qcfg, 'enable_fused_attn_split', None)}, "
                 f"attention_implementation={qcfg.attention_implementation!r}"
             )
     if args.train.enable_fused_swiglu:

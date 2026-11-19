@@ -236,15 +236,18 @@ def flex_attention_with_block_mask(
     return attn_output
 
 
-def flex_attention_prepared(Q, K, V, block_mask, scaling=None):
+def flex_attention_prepared(Q, K, V, block_mask, scaling=None, raw_output=False):
     """Q [B, Hq, L, D], K/V [B, Hkv, L, D] already in flex layout (joint_qkv_prep output, no padding).
 
-    Same output as flex_attention_with_block_mask: [B, L, Hq * D] in Q's dtype.
+    Same output as flex_attention_with_block_mask: [B, L, Hq * D] in Q's dtype; with raw_output=True flex's own
+    output [B, Hq, L, D] instead (for joint_attn_split).
     """
     B, Hq, L, D = Q.shape
     out, _ = flex_attention(
         Q, K, V, block_mask=block_mask, enable_gqa=True,
         scale=D ** -0.5 if scaling is None else scaling, return_lse=True, kernel_options=FLEX_KERNEL_OPTIONS,
     )
+    if raw_output:
+        return out
     # one copy, like the .contiguous() of the padded path
     return out.transpose(1, 2).reshape(B, L, Hq * D)
