@@ -307,6 +307,12 @@ class MyTrainingArguments(TrainingArguments):
                           "with one Triton kernel forward and one backward, bit-exact with the eager transpose, "
                           "cast and slice. Needs enable_fused_qkv_prep."},
     )
+    attention_dtype: Literal["fp32", "bf16"] = field(
+        default="fp32",
+        metadata={"help": "dtype of the Q/K/V of the joint VLM / action-expert flex attention in training forwards. "
+                          "bf16 needs enable_fused_qkv_prep, enable_fused_attn_split and use_compile; the expert's "
+                          "part of the output is returned in the expert's own dtype. Not bit-identical to fp32."},
+    )
 
 @dataclass
 class MyDataArguments(DataArguments):
@@ -427,6 +433,17 @@ def main():
                 f"enable_fused_attn_split={getattr(qcfg, 'enable_fused_attn_split', None)}, "
                 f"attention_implementation={qcfg.attention_implementation!r}"
             )
+    if args.train.attention_dtype != "fp32":
+        # QwenvlWithExpertV2Model validates the combination with the fused switches; check that the value arrived
+        qcfg = model.model.qwenvl_with_expert.config
+        got = getattr(qcfg, "attention_dtype", None)
+        if got != args.train.attention_dtype:
+            raise ValueError(f"attention_dtype would not take effect: the model config has attention_dtype={got!r}")
+        if args.train.attention_dtype == "bf16" and not args.train.use_compile:
+            # without torch.compile flex attention runs PyTorch's eager reference implementation, which with bf16
+            # Q/K/V computes the logits Q K^T and dO V^T in bf16 (the compiled kernel accumulates both in fp32)
+            raise ValueError("attention_dtype bf16 requires use_compile=true: without torch.compile flex attention "
+                             "runs PyTorch's eager reference, which computes the attention logits and dO V^T in bf16")
     if args.train.enable_fused_swiglu:
         from lingbotvla.ops.swiglu import apply_fused_swiglu
         n_patched = apply_fused_swiglu(model)

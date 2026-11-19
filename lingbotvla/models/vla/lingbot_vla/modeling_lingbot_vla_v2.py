@@ -124,6 +124,14 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
     def __init__(self, config: QwenvlWithExpertV2Config, eval=False):
         super().__init__(config=config)
         self.config = config
+        attention_dtype = getattr(self.config, "attention_dtype", "fp32")
+        if attention_dtype not in ("fp32", "bf16"):
+            raise ValueError(f"attention_dtype must be 'fp32' or 'bf16', got {attention_dtype!r}")
+        if attention_dtype == "bf16" and not (
+            getattr(self.config, "enable_fused_qkv_prep", False)
+            and getattr(self.config, "enable_fused_attn_split", False)
+        ):
+            raise ValueError("attention_dtype 'bf16' requires enable_fused_qkv_prep and enable_fused_attn_split")
         vlm_config = AutoConfig.from_pretrained(self.config.tokenizer_path)
         if self.config.vocab_size not in (0, 257152):
             vlm_config.text_config.vocab_size = self.config.vocab_size
@@ -356,6 +364,9 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         use_split = use_fused and getattr(self.config, "enable_fused_attn_split", False)
         if use_split:
             from lingbotvla.ops.joint_attn_split import joint_attn_split
+        # --train.attention_dtype bf16 (needs both of the above): joint_qkv_prep writes bf16 Q/K/V, flex attention runs
+        # on them, and joint_attn_split returns the expert's part in the expert's own dtype
+        attn_dtype = torch.bfloat16 if getattr(self.config, "attention_dtype", "fp32") == "bf16" else torch.float32
 
         for layer_idx in range(num_layers):
             query_states = []
@@ -380,9 +391,9 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
 
             if use_fused:
                 (q_v, k_v, v_v), (q_e, k_e, v_e) = qkv_raw
-                # fp32 [B, Hq|Hkv, L, D], L = Lv + Le not padded to the flex block size
+                # attn_dtype [B, Hq|Hkv, L, D], L = Lv + Le not padded to the flex block size
                 query_states, key_states, value_states = joint_qkv_prep(
-                    q_v, k_v, v_v, q_e, k_e, v_e, rope_cos, rope_sin
+                    q_v, k_v, v_v, q_e, k_e, v_e, rope_cos, rope_sin, out_dtype=attn_dtype
                 )
                 if layer_idx == 0:
                     _full_len = query_states.shape[2]
@@ -514,6 +525,7 @@ class FlowMatchingV2(FlowMatchingV1):
             "precompute_grid_thw",
             "enable_fused_qkv_prep",
             "enable_fused_attn_split",
+            "attention_dtype",
             "vit_attn_implementation",
             "use_moe",
             "bias_update_speed",

@@ -19,6 +19,15 @@ import einops
 
 FLEX_SPARSE_BLOCK_SIZE = 128
 FLEX_KERNEL_OPTIONS = {"BLOCK_M": 32, "BLOCK_N": 64, "num_warps": 4, "num_stages": 2}
+# bf16 Q/K/V (--train.attention_dtype bf16): the backward runs with the forward's tile (dK/dV 32 x 64, dQ 64 x 32) on
+# every GPU. num_warps / num_stages above apply to the backward too. With them, Inductor's default bf16 backward tile
+# for head_dim 128 on compute capability >= 9.0 (64 x 128) needs all 101,376 B of shared memory per block of sm_120
+# GPUs, which PyTorch 2.8's launcher for Inductor kernels refuses ("out of resource"), and on GPUs with more shared
+# memory it would run with 4 instead of the 8 warps Inductor pairs it with. Measured on sm_120 only. fp32 keeps the
+# options above.
+FLEX_KERNEL_OPTIONS_BF16 = {
+    **FLEX_KERNEL_OPTIONS, "bwd_BLOCK_M1": 32, "bwd_BLOCK_N1": 64, "bwd_BLOCK_M2": 64, "bwd_BLOCK_N2": 32,
+}
 
 if Version(torch.__version__) > Version("2.5.0"):
     # Ffex attention is only available from torch 2.5 onwards
@@ -245,7 +254,8 @@ def flex_attention_prepared(Q, K, V, block_mask, scaling=None, raw_output=False)
     B, Hq, L, D = Q.shape
     out, _ = flex_attention(
         Q, K, V, block_mask=block_mask, enable_gqa=True,
-        scale=D ** -0.5 if scaling is None else scaling, return_lse=True, kernel_options=FLEX_KERNEL_OPTIONS,
+        scale=D ** -0.5 if scaling is None else scaling, return_lse=True,
+        kernel_options=FLEX_KERNEL_OPTIONS_BF16 if Q.dtype == torch.bfloat16 else FLEX_KERNEL_OPTIONS,
     )
     if raw_output:
         return out
