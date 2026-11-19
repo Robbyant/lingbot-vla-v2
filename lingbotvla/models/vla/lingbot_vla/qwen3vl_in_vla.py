@@ -316,8 +316,41 @@ def forward_without_grid_thw(
     return hidden_states, deepstack_feature_lists
 
 
-def apply_lingbot_qwen3_vl_patch():
+def _rms_norm(hidden_states, weight, eps: float):
+    # Qwen3VLTextRMSNorm.forward as a function of its tensors, so that one compiled graph per input shape serves every
+    # norm instance (compiling the bound method would guard on each module).
+    input_dtype = hidden_states.dtype
+    hidden_states = hidden_states.to(torch.float32)
+    variance = hidden_states.pow(2).mean(-1, keepdim=True)
+    hidden_states = hidden_states * torch.rsqrt(variance + eps)
+    return weight * hidden_states.to(input_dtype)
+
+
+_rms_norm_compiled = None
+
+
+def _qwen3vl_text_rms_norm_forward_compiled(self, hidden_states):
+    return _rms_norm_compiled(hidden_states, self.weight, self.variance_epsilon)
+
+
+def compiled_rmsnorm_enabled() -> bool:
+    """True once apply_lingbot_qwen3_vl_patch(compile_rmsnorm=True) has replaced Qwen3VLTextRMSNorm.forward."""
+    return _rms_norm_compiled is not None
+
+
+def apply_lingbot_qwen3_vl_patch(compile_rmsnorm: bool = False):
     logger.info_rank0("apply Qwen3-VL Lingbot patch")
+    if compile_rmsnorm:
+        # --train.enable_compiled_rmsnorm. With activation checkpointing (train.enable_gradient_checkpointing) the
+        # decoder layers run eagerly inside the dynamo-disabled checkpoint, so an eager norm is 8 kernels forward and
+        # 15 plus a memcpy and a memset backward. Compiled it is 1 Triton kernel forward and 3 backward, also inside
+        # the checkpoint, in forward and in recompute.
+        global _rms_norm_compiled
+        # no fullgraph: _rms_norm has no graph break, and past the recompile limit (one entry per shape and grad mode,
+        # shared by all norms) a new shape runs eagerly instead of raising
+        _rms_norm_compiled = torch.compile(_rms_norm, dynamic=False)
+        hf_qwen3vl.Qwen3VLTextRMSNorm.forward = _qwen3vl_text_rms_norm_forward_compiled
+        logger.info_rank0("enable_compiled_rmsnorm: Qwen3VLTextRMSNorm.forward runs a torch.compile'd fused kernel")
     hf_qwen3vl.Qwen3VLPreTrainedModel = Qwen3VLPreTrainedModel
     hf_qwen3vl.Qwen3VLTextDecoderLayer = Qwen3VLTextDecoderLayer
     hf_qwen3vl.Qwen3VLTextModel = Qwen3VLTextModel

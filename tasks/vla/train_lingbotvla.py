@@ -283,6 +283,36 @@ class MyTrainingArguments(TrainingArguments):
         default=False,
         metadata={"help": "Whether to apply FSDP2 for VLM."},
     )
+    enable_compiled_rmsnorm: bool = field(
+        default=False,
+        metadata={"help": "Run every Qwen3VLTextRMSNorm of the VLM through one torch.compile'd function: 1 Triton "
+                          "kernel forward and 3 backward instead of 8 and 15 eager kernels. Qwen3-VL VLMs only. "
+                          "Measured with enable_gradient_checkpointing true, where the decoder layers run eagerly."},
+    )
+    enable_fused_qkv_prep: bool = field(
+        default=False,
+        metadata={"help": "Prepare the joint VLM / action-expert attention inputs with one Triton kernel per q/k/v "
+                          "tensor (cast + concat + RoPE + transpose to the flex layout, forward and backward) and run "
+                          "flex attention without padding to the block size. LingbotVLAV2Config (Qwen3-VL) only; "
+                          "needs attention_implementation flex_cached."},
+    )
+    enable_fused_swiglu: bool = field(
+        default=False,
+        metadata={"help": "Compute silu(gate) * up of every Qwen3VLTextMLP with one Triton kernel forward and one "
+                          "backward, bit-exact with the eager F.silu(gate) * up. Qwen3-VL VLMs only."},
+    )
+    enable_fused_attn_split: bool = field(
+        default=False,
+        metadata={"help": "Split the joint VLM / action-expert flex-attention output into the two streams' parts "
+                          "with one Triton kernel forward and one backward, bit-exact with the eager transpose, "
+                          "cast and slice. Needs enable_fused_qkv_prep."},
+    )
+    attention_dtype: Literal["fp32", "bf16"] = field(
+        default="fp32",
+        metadata={"help": "dtype of the Q/K/V of the joint VLM / action-expert flex attention in training forwards. "
+                          "bf16 needs enable_fused_qkv_prep, enable_fused_attn_split and use_compile; the expert's "
+                          "part of the output is returned in the expert's own dtype. Not bit-identical to fp32."},
+    )
 
 @dataclass
 class MyDataArguments(DataArguments):
@@ -379,6 +409,48 @@ def main():
         config_kwargs=config_kwargs,
         moe_implementation=getattr(args.model, 'moe_implementation', None),
     )
+    if args.train.enable_compiled_rmsnorm:
+        # build_foundation_model compiles the norm only for a Qwen3-VL VLM; refuse instead of silently ignoring it
+        from lingbotvla.models.vla.lingbot_vla.qwen3vl_in_vla import compiled_rmsnorm_enabled
+        if not compiled_rmsnorm_enabled():
+            raise ValueError("enable_compiled_rmsnorm applies to a Qwen3-VL VLM (Qwen3VLTextRMSNorm) only")
+    if args.train.enable_fused_attn_split and not args.train.enable_fused_qkv_prep:
+        raise ValueError("enable_fused_attn_split requires enable_fused_qkv_prep (it splits the unpadded flex output "
+                         "of that path)")
+    if args.train.enable_fused_qkv_prep:
+        # What QwenvlWithExpertV2Model.forward reads: a switch that does not arrive there (undeclared config field,
+        # attention_implementation other than flex_cached) would silently run the unfused path.
+        qcfg = model.model.qwenvl_with_expert.config
+        if not (
+            getattr(qcfg, "enable_fused_qkv_prep", False)
+            and qcfg.attention_implementation == "flex_cached"
+            and getattr(qcfg, "enable_fused_attn_split", False) == args.train.enable_fused_attn_split
+        ):
+            raise ValueError(
+                "enable_fused_qkv_prep / enable_fused_attn_split would not take effect (they need "
+                "LingbotVLAV2Config and attention_implementation 'flex_cached'): the model config has "
+                f"enable_fused_qkv_prep={getattr(qcfg, 'enable_fused_qkv_prep', None)}, "
+                f"enable_fused_attn_split={getattr(qcfg, 'enable_fused_attn_split', None)}, "
+                f"attention_implementation={qcfg.attention_implementation!r}"
+            )
+    if args.train.attention_dtype != "fp32":
+        # QwenvlWithExpertV2Model validates the combination with the fused switches; check that the value arrived
+        qcfg = model.model.qwenvl_with_expert.config
+        got = getattr(qcfg, "attention_dtype", None)
+        if got != args.train.attention_dtype:
+            raise ValueError(f"attention_dtype would not take effect: the model config has attention_dtype={got!r}")
+        if args.train.attention_dtype == "bf16" and not args.train.use_compile:
+            # without torch.compile flex attention runs PyTorch's eager reference implementation, which with bf16
+            # Q/K/V computes the logits Q K^T and dO V^T in bf16 (the compiled kernel accumulates both in fp32)
+            raise ValueError("attention_dtype bf16 requires use_compile=true: without torch.compile flex attention "
+                             "runs PyTorch's eager reference, which computes the attention logits and dO V^T in bf16")
+    if args.train.enable_fused_swiglu:
+        from lingbotvla.ops.swiglu import apply_fused_swiglu
+        n_patched = apply_fused_swiglu(model)
+        n_layers = model.model.qwenvl_with_expert.qwenvl.config.text_config.num_hidden_layers
+        if n_patched != n_layers:
+            raise ValueError(f"enable_fused_swiglu: patched {n_patched} Qwen3VLTextMLP modules, expected {n_layers}")
+        logger.info_rank0(f"enable_fused_swiglu: patched {n_patched} Qwen3VLTextMLP modules")
     use_depth_align = True if args.train.align_params != {} else False
     use_future_depth = args.train.align_params.get('depth', {}).get('use_future_depth', False)
     use_future_video = use_depth_align and args.train.align_params.get('use_future_video', False)

@@ -19,6 +19,15 @@ import einops
 
 FLEX_SPARSE_BLOCK_SIZE = 128
 FLEX_KERNEL_OPTIONS = {"BLOCK_M": 32, "BLOCK_N": 64, "num_warps": 4, "num_stages": 2}
+# bf16 Q/K/V (--train.attention_dtype bf16): the backward runs with the forward's tile (dK/dV 32 x 64, dQ 64 x 32) on
+# every GPU. num_warps / num_stages above apply to the backward too. With them, Inductor's default bf16 backward tile
+# for head_dim 128 on compute capability >= 9.0 (64 x 128) needs all 101,376 B of shared memory per block of sm_120
+# GPUs, which PyTorch 2.8's launcher for Inductor kernels refuses ("out of resource"), and on GPUs with more shared
+# memory it would run with 4 instead of the 8 warps Inductor pairs it with. Measured on sm_120 only. fp32 keeps the
+# options above.
+FLEX_KERNEL_OPTIONS_BF16 = {
+    **FLEX_KERNEL_OPTIONS, "bwd_BLOCK_M1": 32, "bwd_BLOCK_N1": 64, "bwd_BLOCK_M2": 64, "bwd_BLOCK_N2": 32,
+}
 
 if Version(torch.__version__) > Version("2.5.0"):
     # Ffex attention is only available from torch 2.5 onwards
@@ -136,10 +145,13 @@ def build_block_mask(
     q_len: int,
     kv_len: int,
     block_size: int = FLEX_SPARSE_BLOCK_SIZE,
+    pad_to_block: bool = True,
 ):
     """
     Build a reusable BlockMask from a 3D attention mask [B, Q, KV].
     This allocates the dense 4D mask once; the returned BlockMask can be reused across layers.
+    pad_to_block=False builds it for q_len/kv_len as they are, for q/k/v that are not padded to a block multiple
+    (torch 2.8 flex handles lengths that are not multiples of the block size).
     """
     from torch.nn.attention.flex_attention import (
         _mask_mod_signature,
@@ -151,12 +163,16 @@ def build_block_mask(
     causal_mask = attention_mask_3d[:, None, :, :].expand(-1, num_heads, -1, -1).contiguous()
     b_mask, h_mask = causal_mask.shape[0], causal_mask.shape[1]
 
-    q_len_rounded = _round_up_to_multiple(q_len, block_size)
-    kv_len_rounded = _round_up_to_multiple(kv_len, block_size)
+    if pad_to_block:
+        q_len_rounded = _round_up_to_multiple(q_len, block_size)
+        kv_len_rounded = _round_up_to_multiple(kv_len, block_size)
 
-    pad_q = q_len_rounded - q_len
-    pad_k = kv_len_rounded - kv_len
-    padded_mask = F.pad(causal_mask, (0, pad_k, 0, pad_q), value=0.0)
+        pad_q = q_len_rounded - q_len
+        pad_k = kv_len_rounded - kv_len
+        padded_mask = F.pad(causal_mask, (0, pad_k, 0, pad_q), value=0.0)
+    else:
+        q_len_rounded, kv_len_rounded = q_len, kv_len
+        padded_mask = causal_mask
 
     def precomputed_mask_factory(precomputed_mask: torch.Tensor):
         def mask_mod(b, h, q_idx, kv_idx):
@@ -227,3 +243,21 @@ def flex_attention_with_block_mask(
     attn_output = attn_output.transpose(1, 2).contiguous()
     attn_output = attn_output.reshape(batch_size, -1, attn_output.shape[2] * attn_output.shape[3])
     return attn_output
+
+
+def flex_attention_prepared(Q, K, V, block_mask, scaling=None, raw_output=False):
+    """Q [B, Hq, L, D], K/V [B, Hkv, L, D] already in flex layout (joint_qkv_prep output, no padding).
+
+    Same output as flex_attention_with_block_mask: [B, L, Hq * D] in Q's dtype; with raw_output=True flex's own
+    output [B, Hq, L, D] instead (for joint_attn_split).
+    """
+    B, Hq, L, D = Q.shape
+    out, _ = flex_attention(
+        Q, K, V, block_mask=block_mask, enable_gqa=True,
+        scale=D ** -0.5 if scaling is None else scaling, return_lse=True,
+        kernel_options=FLEX_KERNEL_OPTIONS_BF16 if Q.dtype == torch.bfloat16 else FLEX_KERNEL_OPTIONS,
+    )
+    if raw_output:
+        return out
+    # one copy, like the .contiguous() of the padded path
+    return out.transpose(1, 2).reshape(B, L, Hq * D)
